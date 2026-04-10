@@ -711,125 +711,91 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # Global CSS — light theme, unified across sidebar + main
+    # Minimal safe CSS — dark Notion-style polish on top of config.toml
     # ------------------------------------------------------------------
     st.markdown(
         """
         <style>
-        /* ── Page & container ── */
-        .stApp {
-            background-color: #F5F7FA;
-        }
+        /* ── Container ── */
         .block-container {
-            max-width: 780px;
+            max-width: 760px;
             padding-top: 2.5rem;
-            padding-bottom: 3rem;
+            padding-bottom: 3.5rem;
         }
 
-        /* ── Sidebar — match main background exactly ── */
+        /* ── Sidebar ── */
         [data-testid="stSidebar"] {
-            background-color: #FFFFFF;
-            border-right: 1px solid #E2E8F0;
+            border-right: 1px solid #2a2d36;
         }
-        [data-testid="stSidebar"] .block-container {
-            padding-top: 1.8rem;
+        [data-testid="stSidebar"] > div:first-child {
+            padding-top: 2rem;
         }
 
-        /* ── Sidebar section divider ── */
-        .sidebar-section {
-            background: #F5F7FA;
+        /* ── Sidebar section cards ── */
+        .sb-card {
+            background: #0f1115;
+            border: 1px solid #2a2d36;
             border-radius: 10px;
-            padding: 1rem 1rem 0.5rem 1rem;
-            margin-bottom: 1rem;
+            padding: 1rem 1rem 0.25rem 1rem;
+            margin-bottom: 0.9rem;
         }
-        .sidebar-section-title {
-            font-size: 0.72rem;
+        .sb-label {
+            font-size: 0.68rem;
             font-weight: 700;
-            letter-spacing: 0.08em;
+            letter-spacing: 0.1em;
             text-transform: uppercase;
-            color: #94A3B8;
-            margin-bottom: 0.75rem;
+            color: #555d6e;
+            margin-bottom: 0.6rem;
         }
 
-        /* ── Main headings ── */
-        h1 {
-            color: #1E293B !important;
-            font-size: 1.75rem !important;
-            font-weight: 700 !important;
-            margin-bottom: 0.2rem !important;
-        }
-        h3 {
-            color: #1E293B !important;
-            font-weight: 600 !important;
-            margin-top: 0 !important;
-        }
-
-        /* ── Upload card ── */
-        .upload-card {
-            background: #FFFFFF;
-            border: 1px solid #E2E8F0;
-            border-radius: 12px;
-            padding: 1.25rem 1.25rem 0.75rem 1.25rem;
-        }
-        .upload-card-title {
-            font-size: 0.85rem;
-            font-weight: 600;
-            color: #475569;
-            margin-bottom: 0.5rem;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
-        .upload-badge {
-            display: inline-block;
-            background: #ECFDF5;
-            color: #065F46;
-            border-radius: 999px;
-            font-size: 0.78rem;
-            font-weight: 600;
-            padding: 0.2rem 0.75rem;
-            margin-top: 0.4rem;
-        }
-
-        /* ── Gap utility ── */
-        .gap-sm  { margin-top: 1rem; }
-        .gap-md  { margin-top: 1.75rem; }
-        .gap-lg  { margin-top: 2.5rem; }
-
-        /* ── Slider label clarity ── */
-        [data-testid="stSlider"] label p {
-            font-size: 0.83rem !important;
-            font-weight: 600 !important;
-            color: #334155 !important;
-        }
-
-        /* ── Generate button ── */
-        [data-testid="stButton"] > button[kind="primary"] {
-            background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%);
-            color: #FFFFFF;
-            border: none;
+        /* ── Upload panels ── */
+        .up-panel {
+            background: #1a1d24;
+            border: 1px solid #2a2d36;
             border-radius: 10px;
-            font-size: 1rem;
-            font-weight: 600;
-            padding: 0.65rem 1rem;
-            letter-spacing: 0.02em;
-            transition: opacity 0.15s ease;
+            padding: 1.1rem 1.1rem 0.5rem 1.1rem;
+            min-height: 170px;
         }
-        [data-testid="stButton"] > button[kind="primary"]:hover {
-            opacity: 0.9;
+        .up-label {
+            font-size: 0.75rem;
+            font-weight: 700;
+            letter-spacing: 0.07em;
+            text-transform: uppercase;
+            color: #6b7280;
+            margin-bottom: 0.5rem;
+        }
+        .up-badge {
+            display: inline-block;
+            background: #0d2b1f;
+            color: #4ade80;
+            border: 1px solid #166534;
+            border-radius: 999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 0.15rem 0.7rem;
+            margin-top: 0.35rem;
+        }
+
+        /* ── Spacing helpers ── */
+        .gap-sm { margin-top: 0.9rem; }
+        .gap-md { margin-top: 1.6rem; }
+
+        /* ── Primary button ── */
+        button[kind="primary"] {
+            border-radius: 8px !important;
+            font-weight: 600 !important;
+            letter-spacing: 0.02em !important;
         }
 
         /* ── Download buttons ── */
-        [data-testid="stDownloadButton"] > button {
-            background: #FFFFFF;
-            border: 1.5px solid #CBD5E1;
-            color: #1E293B;
-            border-radius: 8px;
-            font-weight: 500;
+        [data-testid="stDownloadButton"] button {
+            border-radius: 8px !important;
+            font-weight: 500 !important;
         }
-        [data-testid="stDownloadButton"] > button:hover {
-            border-color: #2563EB;
-            color: #2563EB;
-        }
+
+        /* ── Headings ── */
+        h1 { font-size: 1.65rem !important; font-weight: 700 !important; margin-bottom: 0.15rem !important; }
+        h3 { font-weight: 600 !important; margin-top: 0 !important; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -840,21 +806,19 @@ def main() -> None:
     # -----------------------------------------------------------------------
     with st.sidebar:
         st.markdown("## ⚙️ Configuration")
-        st.markdown("<div style='margin-bottom:1.25rem'></div>", unsafe_allow_html=True)
+        st.markdown("<div class='gap-sm'></div>", unsafe_allow_html=True)
 
-        # Section 1 — Selection
+        # — Section 1: Selection —
         st.markdown(
-            "<div class='sidebar-section'>"
-            "<div class='sidebar-section-title'>Selection</div>",
+            "<div class='sb-card'><div class='sb-label'>Top Candidates</div>",
             unsafe_allow_html=True,
         )
-        top_n = st.slider("Top Candidates per JD", min_value=1, max_value=20, value=5)
+        top_n = st.slider("Per JD", min_value=1, max_value=20, value=5)
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # Section 2 — Scoring Weights
+        # — Section 2: Scoring Weights —
         st.markdown(
-            "<div class='sidebar-section'>"
-            "<div class='sidebar-section-title'>Scoring Weights (%)</div>",
+            "<div class='sb-card'><div class='sb-label'>Scoring Weights (%)</div>",
             unsafe_allow_html=True,
         )
         w_skills = st.slider("Skills Weight",     0, 100, 60, step=5)
@@ -862,10 +826,9 @@ def main() -> None:
         w_exp    = st.slider("Experience Weight", 0, 100, 20, step=5)
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # Validation
         total_w = w_skills + w_edu + w_exp
         if total_w != 100:
-            st.error(f"Weights sum to **{total_w}%** — must equal 100%.")
+            st.error(f"Total is **{total_w}%** — weights must sum to 100%.")
         else:
             st.success("✅ Weights sum to 100%")
 
@@ -874,7 +837,7 @@ def main() -> None:
     # -----------------------------------------------------------------------
     st.title("📄 ATS Resume Screener")
     st.markdown(
-        "<p style='color:#64748B; font-size:0.95rem; margin-top:0.1rem; margin-bottom:0;'>"
+        "<p style='color:#6b7280; font-size:0.93rem; margin-top:0.05rem; margin-bottom:0;'>"
         "Upload job descriptions and resumes — get ranked hiring reports instantly."
         "</p>",
         unsafe_allow_html=True,
@@ -882,13 +845,12 @@ def main() -> None:
 
     st.markdown("<div class='gap-md'></div>", unsafe_allow_html=True)
 
-    # Upload section — two columns
+    # — Upload section —
     col_jd, col_res = st.columns(2, gap="medium")
 
     with col_jd:
         st.markdown(
-            "<div class='upload-card'>"
-            "<div class='upload-card-title'>📋 Job Descriptions</div>",
+            "<div class='up-panel'><div class='up-label'>📋 Job Descriptions</div>",
             unsafe_allow_html=True,
         )
         jd_files = st.file_uploader(
@@ -899,16 +861,16 @@ def main() -> None:
             label_visibility="collapsed",
         )
         if jd_files:
+            n = len(jd_files)
             st.markdown(
-                f"<div class='upload-badge'>✅ {len(jd_files)} JD{'s' if len(jd_files) != 1 else ''} uploaded</div>",
+                f"<div class='up-badge'>✅ {n} JD{'s' if n != 1 else ''} uploaded</div>",
                 unsafe_allow_html=True,
             )
         st.markdown("</div>", unsafe_allow_html=True)
 
     with col_res:
         st.markdown(
-            "<div class='upload-card'>"
-            "<div class='upload-card-title'>📄 Resumes</div>",
+            "<div class='up-panel'><div class='up-label'>📄 Resumes</div>",
             unsafe_allow_html=True,
         )
         resume_files = st.file_uploader(
@@ -919,15 +881,16 @@ def main() -> None:
             label_visibility="collapsed",
         )
         if resume_files:
+            n = len(resume_files)
             st.markdown(
-                f"<div class='upload-badge'>✅ {len(resume_files)} Resume{'s' if len(resume_files) != 1 else ''} uploaded</div>",
+                f"<div class='up-badge'>✅ {n} Resume{'s' if n != 1 else ''} uploaded</div>",
                 unsafe_allow_html=True,
             )
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("<div class='gap-md'></div>", unsafe_allow_html=True)
 
-    # Primary action button
+    # — Generate button —
     if st.button("📄 Generate Reports", type="primary", use_container_width=True):
         errors = []
         if not jd_files:
@@ -943,7 +906,6 @@ def main() -> None:
 
         weights = {"skills": w_skills, "education": w_edu, "experience": w_exp}
 
-        # Parse JDs
         with st.spinner("Parsing job descriptions…"):
             jd_list = []
             for f in jd_files:
@@ -960,7 +922,6 @@ def main() -> None:
             st.error("No valid JDs parsed.")
             return
 
-        # Parse resumes
         with st.spinner("Parsing resumes…"):
             resume_list = []
             for f in resume_files:
@@ -975,11 +936,10 @@ def main() -> None:
             st.error("No valid resumes parsed.")
             return
 
-        # Score and cluster
         with st.spinner("Scoring and assigning candidates…"):
             assignments = cluster_resumes_to_jds(resume_list, jd_list, weights, top_n)
 
-        # Results Summary
+        # — Results Summary —
         st.markdown("<div class='gap-md'></div>", unsafe_allow_html=True)
         st.markdown("### Results Summary")
 
@@ -990,12 +950,11 @@ def main() -> None:
             else:
                 st.warning(f"**{jd['name']}** → No suitable candidates found")
 
-        # Download section
+        # — Downloads —
         any_dl = any(assignments.get(jd["name"]) for jd in jd_list)
         if any_dl:
             st.markdown("<div class='gap-md'></div>", unsafe_allow_html=True)
             st.markdown("### Download Reports")
-
             for jd in jd_list:
                 candidates = assignments.get(jd["name"], [])
                 if not candidates:
