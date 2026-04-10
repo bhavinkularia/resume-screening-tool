@@ -712,72 +712,82 @@ def main() -> None:
     st.markdown(
         """
         <style>
-        .block-container { max-width: 800px; padding-top: 2rem; }
-        h1 { color: #1F457C; }
+        .block-container { max-width: 780px; padding-top: 2rem; padding-bottom: 3rem; }
+        h1 { color: #1F457C; margin-bottom: 0.1rem; }
+        .upload-label { font-size: 0.85rem; color: #666; margin-bottom: 0.25rem; }
+        .section-gap { margin-top: 1.5rem; }
+        [data-testid="stSidebar"] { background-color: #f8f9fb; }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    st.title("\U0001f4cb ATS Resume Screener")
-    st.caption("Upload job descriptions and resumes. Download ranked Word reports per JD.")
-    st.divider()
+    # -----------------------------------------------------------------------
+    # SIDEBAR — all configuration controls
+    # -----------------------------------------------------------------------
+    with st.sidebar:
+        st.markdown("## ⚙️ Settings")
+        st.markdown("---")
 
-    # 1 · Job Descriptions
-    st.subheader("1 \u00b7 Job Descriptions")
-    jd_files = st.file_uploader(
-        "Upload JDs (PDF, DOCX, TXT)",
-        type=["pdf", "docx", "txt"],
-        accept_multiple_files=True,
-        key="jd_uploader",
-    )
+        top_n = st.slider("Top N candidates per JD", min_value=1, max_value=20, value=5)
 
-    # 2 · Resumes
-    st.subheader("2 \u00b7 Resumes")
-    resume_files = st.file_uploader(
-        "Upload Resumes (PDF, DOCX, TXT)",
-        type=["pdf", "docx", "txt"],
-        accept_multiple_files=True,
-        key="resume_uploader",
-    )
-
-    st.divider()
-
-    # 3 · Top N
-    st.subheader("3 \u00b7 Top Candidates per JD")
-    top_n = st.slider("Select top N candidates", min_value=1, max_value=20, value=5)
-
-    st.divider()
-
-    # 4 · Scoring weights
-    st.subheader("4 \u00b7 Scoring Weights  (must total 100%)")
-    col1, col2, col3 = st.columns(3)
-    with col1:
+        st.markdown("#### Scoring Weights")
         w_skills = st.slider("Skills %", 0, 100, 60, step=5)
-    with col2:
-        w_edu = st.slider("Education %", 0, 100, 20, step=5)
-    with col3:
-        w_exp = st.slider("Experience %", 0, 100, 20, step=5)
+        w_edu    = st.slider("Education %", 0, 100, 20, step=5)
+        w_exp    = st.slider("Experience %", 0, 100, 20, step=5)
 
-    total_w = w_skills + w_edu + w_exp
-    if total_w != 100:
-        st.warning(f"\u26a0\ufe0f Weights total {total_w}% \u2014 adjust to sum to 100%.")
-    else:
-        st.success("\u2705 Weights sum to 100%")
+        total_w = w_skills + w_edu + w_exp
+        if total_w != 100:
+            st.warning(f"⚠️ Weights total {total_w}% — must sum to 100%.")
+        else:
+            st.success("✅ Weights sum to 100%")
 
-    st.divider()
+    # -----------------------------------------------------------------------
+    # MAIN PAGE
+    # -----------------------------------------------------------------------
+    st.title("📄 ATS Resume Screener")
+    st.caption("Upload job descriptions and resumes, then generate ranked hiring reports.")
 
-    # 5 · Generate
-    if st.button(
-        "\U0001f4c4 Generate Hiring Report", type="primary", use_container_width=True
-    ):
+    st.markdown("<div class='section-gap'></div>", unsafe_allow_html=True)
+
+    # Upload section — two columns
+    col_jd, col_res = st.columns(2)
+
+    with col_jd:
+        st.markdown("**Job Descriptions**")
+        jd_files = st.file_uploader(
+            "Upload JDs (PDF, DOCX, TXT)",
+            type=["pdf", "docx", "txt"],
+            accept_multiple_files=True,
+            key="jd_uploader",
+            label_visibility="collapsed",
+        )
+        if jd_files:
+            st.caption(f"✅ {len(jd_files)} JD{'s' if len(jd_files) != 1 else ''} uploaded")
+
+    with col_res:
+        st.markdown("**Resumes**")
+        resume_files = st.file_uploader(
+            "Upload Resumes (PDF, DOCX, TXT)",
+            type=["pdf", "docx", "txt"],
+            accept_multiple_files=True,
+            key="resume_uploader",
+            label_visibility="collapsed",
+        )
+        if resume_files:
+            st.caption(f"✅ {len(resume_files)} resume{'s' if len(resume_files) != 1 else ''} uploaded")
+
+    st.markdown("<div class='section-gap'></div>", unsafe_allow_html=True)
+
+    # Primary action button
+    if st.button("📄 Generate Reports", type="primary", use_container_width=True):
         errors = []
         if not jd_files:
             errors.append("Upload at least one Job Description.")
         if not resume_files:
             errors.append("Upload at least one Resume.")
         if total_w != 100:
-            errors.append("Scoring weights must sum to 100%.")
+            errors.append("Scoring weights in the sidebar must sum to 100%.")
         for e in errors:
             st.error(e)
         if errors:
@@ -785,13 +795,13 @@ def main() -> None:
 
         weights = {"skills": w_skills, "education": w_edu, "experience": w_exp}
 
-        # Parse JDs once each
-        with st.spinner("Parsing job descriptions\u2026"):
+        # Parse JDs
+        with st.spinner("Parsing job descriptions…"):
             jd_list = []
             for f in jd_files:
                 raw = extract_text(f)
                 if not raw.strip():
-                    st.warning(f"\u26a0\ufe0f Could not read: {f.name}")
+                    st.warning(f"⚠️ Could not read: {f.name}")
                     continue
                 jd_list.append({
                     "name": f.name.rsplit(".", 1)[0],
@@ -803,12 +813,12 @@ def main() -> None:
             return
 
         # Parse resumes
-        with st.spinner("Parsing resumes\u2026"):
+        with st.spinner("Parsing resumes…"):
             resume_list = []
             for f in resume_files:
                 raw = extract_text(f)
                 if not raw.strip():
-                    st.warning(f"\u26a0\ufe0f Could not read: {f.name}")
+                    st.warning(f"⚠️ Could not read: {f.name}")
                     continue
                 parsed = parse_resume(raw)
                 resume_list.append({"name": f.name.rsplit(".", 1)[0], **parsed})
@@ -818,41 +828,43 @@ def main() -> None:
             return
 
         # Score and cluster
-        with st.spinner("Scoring and assigning candidates\u2026"):
+        with st.spinner("Scoring and assigning candidates…"):
             assignments = cluster_resumes_to_jds(resume_list, jd_list, weights, top_n)
 
-        # Summary
-        st.divider()
-        st.subheader("Results Summary")
+        # Results Summary
+        st.markdown("<div class='section-gap'></div>", unsafe_allow_html=True)
+        st.markdown("### Results Summary")
+
         for jd in jd_list:
             candidates = assignments.get(jd["name"], [])
             if candidates:
-                st.success(f"**{jd['name']}** \u2192 {len(candidates)} candidate(s) selected")
+                st.success(f"**{jd['name']}** → {len(candidates)} candidate(s) selected")
             else:
-                st.info(f"**{jd['name']}** \u2192 No suitable candidates found")
+                st.warning(f"**{jd['name']}** → No suitable candidates found")
 
-        # Downloads
-        st.divider()
-        st.subheader("Download Reports")
-        any_dl = False
-        for jd in jd_list:
-            candidates = assignments.get(jd["name"], [])
-            if not candidates:
-                continue
-            any_dl = True
-            report = generate_jd_report(jd["name"], candidates)
-            safe = re.sub(r"[^\w\-_]", "_", jd["name"])
-            st.download_button(
-                label=f"\u2b07\ufe0f Download Report \u2014 {jd['name']}",
-                data=report,
-                file_name=f"{safe}_report.docx",
-                mime=(
-                    "application/vnd.openxmlformats-officedocument"
-                    ".wordprocessingml.document"
-                ),
-                use_container_width=True,
-            )
-        if not any_dl:
+        # Download section
+        any_dl = any(assignments.get(jd["name"]) for jd in jd_list)
+        if any_dl:
+            st.markdown("<div class='section-gap'></div>", unsafe_allow_html=True)
+            st.markdown("### Download Reports")
+
+            for jd in jd_list:
+                candidates = assignments.get(jd["name"], [])
+                if not candidates:
+                    continue
+                report = generate_jd_report(jd["name"], candidates)
+                safe = re.sub(r"[^\w\-_]", "_", jd["name"])
+                st.download_button(
+                    label=f"⬇ Download — {jd['name']}",
+                    data=report,
+                    file_name=f"{safe}_report.docx",
+                    mime=(
+                        "application/vnd.openxmlformats-officedocument"
+                        ".wordprocessingml.document"
+                    ),
+                    use_container_width=True,
+                )
+        else:
             st.warning("No candidates were assigned to any JD.")
 
 
