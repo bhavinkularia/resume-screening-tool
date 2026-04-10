@@ -1,1104 +1,683 @@
 """
-Production-Grade ATS (Applicant Tracking System)
-Cluster-Based Matching Engine — No AI, No APIs, Fully Deterministic
+ATS - Applicant Tracking System
+Production-ready, rule-based resume screening with Word report generation.
 """
 
-import streamlit as st
-import re
 import io
+import re
+import zipfile
 from collections import defaultdict
-from typing import Dict, List, Tuple, Set, Optional
 
-# ─── Third-party imports (graceful fallback) ──────────────────────────────────
-try:
-    import pdfplumber
-    PDF_SUPPORT = True
-except ImportError:
-    PDF_SUPPORT = False
+import streamlit as st
+import pdfplumber
+import docx
+from docx import Document
+from docx.shared import Pt, RGBColor, Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 
-try:
-    from docx import Document as DocxDocument
-    DOCX_SUPPORT = True
-except ImportError:
-    DOCX_SUPPORT = False
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 1 — CONFIGURATION & CONSTANTS
-# ══════════════════════════════════════════════════════════════════════════════
-
-# Comprehensive skill dictionary grouped by domain
-SKILL_DICTIONARY: Dict[str, List[str]] = {
-    # Programming Languages
-    "programming": [
-        "python", "java", "javascript", "typescript", "c++", "c#", "ruby",
-        "go", "rust", "kotlin", "swift", "scala", "r", "matlab", "php",
-        "perl", "bash", "shell", "powershell", "vba", "dart", "elixir",
-        "haskell", "lua", "groovy",
-    ],
-    # Web & Frontend
-    "web_frontend": [
-        "html", "css", "react", "angular", "vue", "svelte", "nextjs",
-        "nuxtjs", "gatsby", "webpack", "babel", "sass", "less", "bootstrap",
-        "tailwind", "jquery", "redux", "graphql", "rest", "ajax",
-        "responsive design", "web design",
-    ],
-    # Backend & APIs
-    "web_backend": [
-        "django", "flask", "fastapi", "node", "express", "spring", "laravel",
-        "rails", "asp.net", "microservices", "api", "rest api", "soap",
-        "grpc", "websocket", "oauth",
-    ],
-    # Data & Analytics
-    "data": [
-        "sql", "mysql", "postgresql", "mongodb", "redis", "elasticsearch",
-        "pandas", "numpy", "scipy", "matplotlib", "seaborn", "plotly",
-        "tableau", "power bi", "excel", "google sheets", "looker", "metabase",
-        "data analysis", "data visualization", "etl", "data pipeline",
-        "data modeling", "data warehouse", "data lake",
-    ],
-    # Machine Learning & AI
-    "ml_ai": [
-        "machine learning", "deep learning", "nlp", "computer vision",
-        "tensorflow", "pytorch", "keras", "scikit-learn", "xgboost",
-        "lightgbm", "neural network", "cnn", "rnn", "lstm", "transformer",
-        "bert", "gpt", "llm", "rag", "huggingface", "opencv",
-        "reinforcement learning", "feature engineering",
-    ],
-    # Cloud & DevOps
-    "cloud_devops": [
-        "aws", "gcp", "azure", "docker", "kubernetes", "terraform", "ansible",
-        "jenkins", "gitlab", "github actions", "ci/cd", "linux", "unix",
-        "nginx", "apache", "cloudformation", "lambda", "ec2", "s3", "rds",
-        "devops", "sre", "monitoring", "prometheus", "grafana",
-    ],
-    # Databases
-    "database": [
-        "oracle", "sql server", "sqlite", "cassandra", "dynamodb", "firebase",
-        "neo4j", "influxdb", "snowflake", "bigquery", "redshift",
-        "database design", "nosql",
-    ],
-    # Marketing
-    "marketing": [
-        "seo", "sem", "ppc", "google ads", "facebook ads", "social media",
-        "content marketing", "email marketing", "crm", "hubspot", "salesforce",
-        "marketo", "digital marketing", "brand management", "copywriting",
-        "marketing strategy", "market research", "analytics", "a/b testing",
-        "conversion rate", "lead generation", "affiliate marketing",
-    ],
-    # Finance & Accounting
-    "finance": [
-        "accounting", "financial modeling", "valuation", "dcf", "excel",
-        "bloomberg", "risk management", "portfolio management", "trading",
-        "investment banking", "equity research", "financial analysis",
-        "budgeting", "forecasting", "p&l", "balance sheet", "audit",
-        "taxation", "ifrs", "gaap", "quickbooks", "tally", "erp", "sap",
-    ],
-    # Design
-    "design": [
-        "figma", "sketch", "adobe xd", "photoshop", "illustrator",
-        "indesign", "after effects", "ui design", "ux design", "ui/ux",
-        "wireframing", "prototyping", "user research", "design thinking",
-        "typography", "branding", "graphic design", "motion design",
-        "interaction design",
-    ],
-    # Project Management
-    "pm": [
-        "agile", "scrum", "kanban", "jira", "confluence", "trello",
-        "project management", "product management", "roadmap", "sprint",
-        "stakeholder management", "pmp", "prince2", "risk assessment",
-        "ms project",
-    ],
-    # Soft Skills & Business
-    "business": [
-        "leadership", "communication", "teamwork", "problem solving",
-        "critical thinking", "negotiation", "presentation", "business analysis",
-        "strategy", "consulting", "client management", "vendor management",
-        "operations", "supply chain", "logistics",
-    ],
-    # HR
-    "hr": [
-        "recruitment", "talent acquisition", "onboarding", "payroll",
-        "performance management", "employee relations", "hris",
-        "workday", "successfactors", "hr analytics", "compensation",
-        "benefits", "training", "learning development",
-    ],
+SKILLS_SECTION_KEYWORDS = {
+    "skills", "technical skills", "core competencies",
+    "technologies", "tech stack", "tools", "expertise",
+    "competencies", "proficiencies"
 }
 
-# Flatten for quick lookup
-ALL_SKILLS: Set[str] = {
-    skill for domain_skills in SKILL_DICTIONARY.values()
-    for skill in domain_skills
+EDUCATION_KEYWORDS = {
+    "b.tech", "b.e", "be ", "btech", "bachelor", "b.sc", "bsc",
+    "m.tech", "mtech", "m.e", "me ", "master", "mba", "m.sc", "msc",
+    "phd", "ph.d", "doctorate", "diploma", "associate",
+    "10th", "12th", "ssc", "hsc", "intermediate", "matric",
+    "computer science", "information technology", "engineering",
+    "mathematics", "statistics", "data science", "machine learning",
 }
 
-# Education keywords with hierarchy weights
-EDUCATION_KEYWORDS: Dict[str, float] = {
-    "phd": 1.0, "doctorate": 1.0, "d.phil": 1.0,
-    "mba": 0.9, "master": 0.85, "m.tech": 0.85, "m.sc": 0.85,
-    "m.com": 0.8, "mca": 0.8, "me": 0.8, "ms": 0.8,
-    "b.tech": 0.75, "be": 0.75, "btech": 0.75, "b.e": 0.75,
-    "bca": 0.7, "b.sc": 0.7, "bsc": 0.7, "bachelor": 0.7,
-    "b.com": 0.65, "bcom": 0.65, "bba": 0.65,
-    "ca": 0.85, "cpa": 0.85, "cfa": 0.85, "acca": 0.8,
-    "diploma": 0.5, "certification": 0.45, "certificate": 0.45,
-    "12th": 0.3, "10th": 0.2, "high school": 0.25,
-    "design": 0.7, "arts": 0.6, "law": 0.75, "llb": 0.75, "llm": 0.85,
-    "mbbs": 0.9, "md": 0.9,
+EDUCATION_SCORE_MAP = {
+    "phd": 100, "ph.d": 100, "doctorate": 100,
+    "m.tech": 90, "mtech": 90, "m.e": 90, "master": 90,
+    "mba": 85, "m.sc": 85, "msc": 85,
+    "b.tech": 75, "btech": 75, "b.e": 75, "be ": 75, "bachelor": 75,
+    "b.sc": 70, "bsc": 70,
+    "diploma": 55, "associate": 55,
+    "12th": 40, "hsc": 40, "intermediate": 40,
+    "10th": 25, "ssc": 25, "matric": 25,
 }
 
-# Stopwords to filter out
-STOPWORDS: Set[str] = {
-    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
-    "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
-    "being", "have", "has", "had", "do", "does", "did", "will", "would",
-    "could", "should", "may", "might", "shall", "can", "need", "dare",
-    "ought", "used", "that", "this", "these", "those", "i", "we", "you",
-    "he", "she", "it", "they", "me", "him", "her", "us", "them", "my",
-    "your", "his", "its", "our", "their", "not", "no", "nor", "so", "yet",
-    "both", "either", "neither", "each", "every", "all", "any", "few",
-    "more", "most", "other", "some", "such", "than", "too", "very",
-    "just", "as", "if", "while", "because", "since", "although", "though",
-    "also", "about", "after", "before", "between", "into", "through",
-    "during", "above", "below", "up", "down", "out", "off", "over",
-    "under", "again", "further", "then", "once", "here", "there", "when",
-    "where", "why", "how", "what", "which", "who", "whom", "whose",
-    "work", "experience", "years", "year", "role", "position", "company",
-    "team", "good", "strong", "knowledge", "understanding", "ability",
-    "skills", "skill", "required", "requirement", "qualification",
-    "preferred", "plus", "must", "responsible", "responsibility",
-    "looking", "seeking", "candidate", "candidates", "applicant",
-    "will", "joining", "join", "work", "working",
-}
+EXPERIENCE_PATTERNS = [
+    r"(\d+(?:\.\d+)?)\s*\+?\s*years?\s+(?:of\s+)?(?:experience|exp)",
+    r"experience\s+(?:of\s+)?(\d+(?:\.\d+)?)\s*\+?\s*years?",
+    r"(\d+(?:\.\d+)?)\s*\+?\s*yrs?\s+(?:of\s+)?(?:experience|exp)",
+    r"(\d+(?:\.\d+)?)\s*\+?\s*years?",
+]
 
-# Similarity weights (must sum to 1.0)
-WEIGHTS = {
-    "skills": 0.50,
-    "keywords": 0.20,
-    "education": 0.15,
-    "experience": 0.15,
-}
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 2 — TEXT EXTRACTION
-# ══════════════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
+# Text Extraction
+# ---------------------------------------------------------------------------
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
-    """Extract raw text from a PDF file using pdfplumber."""
-    if not PDF_SUPPORT:
-        return ""
+    """Extract raw text from a PDF file."""
+    text = ""
     try:
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            pages = [page.extract_text() or "" for page in pdf.pages]
-        return "\n".join(pages)
+            for page in pdf.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
     except Exception:
-        return ""
+        pass
+    return text
 
 
 def extract_text_from_docx(file_bytes: bytes) -> str:
-    """Extract raw text from a DOCX file using python-docx."""
-    if not DOCX_SUPPORT:
-        return ""
+    """Extract raw text from a DOCX file."""
+    text = ""
     try:
-        doc = DocxDocument(io.BytesIO(file_bytes))
-        paragraphs = [para.text for para in doc.paragraphs]
-        # Also grab table content
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    paragraphs.append(cell.text)
-        return "\n".join(paragraphs)
+        doc = docx.Document(io.BytesIO(file_bytes))
+        for para in doc.paragraphs:
+            text += para.text + "\n"
+    except Exception:
+        pass
+    return text
+
+
+def extract_text_from_txt(file_bytes: bytes) -> str:
+    """Decode plain text file."""
+    try:
+        return file_bytes.decode("utf-8", errors="replace")
     except Exception:
         return ""
 
 
-def extract_text(file_bytes: bytes, filename: str) -> str:
-    """Route to correct extractor based on file extension."""
-    ext = filename.lower().rsplit(".", 1)[-1]
-    if ext == "pdf":
-        text = extract_text_from_pdf(file_bytes)
-    elif ext in ("docx", "doc"):
-        text = extract_text_from_docx(file_bytes)
+def extract_text(uploaded_file) -> str:
+    """Route to appropriate extractor based on file type."""
+    file_bytes = uploaded_file.read()
+    name = uploaded_file.name.lower()
+    if name.endswith(".pdf"):
+        return extract_text_from_pdf(file_bytes)
+    elif name.endswith(".docx"):
+        return extract_text_from_docx(file_bytes)
+    elif name.endswith(".txt"):
+        return extract_text_from_txt(file_bytes)
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Parsing Helpers
+# ---------------------------------------------------------------------------
+
+def tokenize_skills(text: str) -> set:
+    """
+    Extract candidate skill tokens from free-form text.
+    Returns lowercase stripped tokens (1–4 words each).
+    """
+    tokens = set()
+    text_lower = text.lower()
+
+    # Multi-word phrases (2–4 words) using sliding window over words
+    words = re.findall(r"[a-z0-9#+.\-/]+", text_lower)
+    for n in range(1, 5):
+        for i in range(len(words) - n + 1):
+            phrase = " ".join(words[i : i + n])
+            if len(phrase) > 1:
+                tokens.add(phrase)
+
+    return tokens
+
+
+def detect_skills_section_bounds(lines: list[str]) -> tuple[int, int]:
+    """
+    Return (start_line, end_line) of the skills section, or (-1, -1) if absent.
+    The section ends when another section header is detected.
+    """
+    section_header_re = re.compile(
+        r"^\s*(skills|technical skills|core competencies|technologies|"
+        r"tech stack|tools|expertise|competencies|proficiencies)\s*[:\-]?\s*$",
+        re.IGNORECASE,
+    )
+    # Detect any generic section header (ALL CAPS or Title Case short lines)
+    generic_header_re = re.compile(r"^\s*[A-Z][A-Za-z\s]{2,30}\s*[:\-]?\s*$")
+
+    start = -1
+    for i, line in enumerate(lines):
+        if section_header_re.match(line):
+            start = i
+            break
+
+    if start == -1:
+        return -1, -1
+
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        stripped = lines[i].strip()
+        if not stripped:
+            continue
+        if generic_header_re.match(stripped) and not section_header_re.match(stripped):
+            end = i
+            break
+
+    return start, end
+
+
+def extract_skills_with_weights(text: str, jd_skills: set) -> dict[str, float]:
+    """
+    For each JD skill, determine if it appears in the resume and at what weight.
+    Skills section → weight 1.0; elsewhere → weight 0.6.
+    Returns {skill: weight} for matched skills only.
+    """
+    lines = text.split("\n")
+    sec_start, sec_end = detect_skills_section_bounds(lines)
+
+    skills_section_text = ""
+    if sec_start != -1:
+        skills_section_text = " ".join(lines[sec_start:sec_end]).lower()
+
+    full_text_lower = text.lower()
+    matched = {}
+
+    for skill in jd_skills:
+        skill_lower = skill.lower()
+        # Check skills section first (higher weight)
+        if skills_section_text and skill_lower in skills_section_text:
+            matched[skill] = 1.0
+        elif skill_lower in full_text_lower:
+            matched[skill] = 0.6
+
+    return matched
+
+
+def score_education(text: str) -> float:
+    """
+    Rule-based education score (0–100).
+    Takes the highest matching qualification found in text.
+    """
+    text_lower = text.lower()
+    best = 0
+    for keyword, score in EDUCATION_SCORE_MAP.items():
+        if keyword in text_lower:
+            best = max(best, score)
+    return best
+
+
+def score_experience(text: str) -> float:
+    """
+    Extract years of experience from text and map to 0–100 score.
+    """
+    text_lower = text.lower()
+    years_found = []
+
+    for pattern in EXPERIENCE_PATTERNS:
+        matches = re.findall(pattern, text_lower)
+        for m in matches:
+            try:
+                years_found.append(float(m))
+            except ValueError:
+                pass
+
+    if not years_found:
+        return 0.0
+
+    years = max(years_found)
+
+    # Map years → score (capped at 15 years = 100)
+    if years >= 15:
+        return 100.0
+    elif years >= 10:
+        return 90.0
+    elif years >= 7:
+        return 80.0
+    elif years >= 5:
+        return 70.0
+    elif years >= 3:
+        return 55.0
+    elif years >= 1:
+        return 35.0
     else:
-        # Attempt decode as plain text
-        try:
-            text = file_bytes.decode("utf-8", errors="ignore")
-        except Exception:
-            text = ""
-    return text
+        return 10.0
 
 
-def normalize_text(text: str) -> str:
-    """Lowercase, remove special chars, collapse whitespace."""
-    text = text.lower()
-    text = re.sub(r"[^\w\s\+\#\./]", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+# ---------------------------------------------------------------------------
+# JD Feature Extraction
+# ---------------------------------------------------------------------------
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 3 — FEATURE EXTRACTION
-# ══════════════════════════════════════════════════════════════════════════════
-
-def extract_skills(text: str) -> Set[str]:
+def extract_jd_features(jd_text: str) -> dict:
     """
-    Match skills from the predefined dictionary against the document text.
-    Uses word-boundary matching for accuracy.
+    Extract skills required by a JD.
+    Returns a dict with 'skills' (set of strings).
     """
-    found: Set[str] = set()
-    for skill in ALL_SKILLS:
-        # Build pattern: handle multi-word skills and special chars (c++, c#)
-        escaped = re.escape(skill)
-        pattern = r"(?<!\w)" + escaped + r"(?!\w)"
-        if re.search(pattern, text):
-            found.add(skill)
-    return found
+    tokens = tokenize_skills(jd_text)
+    # Filter to plausible skill tokens (remove very short/generic ones)
+    skills = {t for t in tokens if 2 < len(t) <= 40}
+    return {"skills": skills}
 
 
-def extract_keywords(text: str) -> Set[str]:
+# ---------------------------------------------------------------------------
+# Scoring
+# ---------------------------------------------------------------------------
+
+def score_resume_against_jd(
+    resume_text: str,
+    jd_features: dict,
+    weights: dict,
+) -> dict:
     """
-    Extract meaningful tokens after stopword removal.
-    Keep tokens of length ≥ 3.
+    Compute the composite score of a resume against a JD.
+
+    Returns:
+        {
+            "total": float (0–100),
+            "skill_score": float,
+            "education_score": float,
+            "experience_score": float,
+            "matched_skills": list[str],
+            "missing_skills": list[str],
+        }
     """
-    tokens = text.split()
-    keywords: Set[str] = set()
-    for token in tokens:
-        clean = re.sub(r"[^\w]", "", token)
-        if len(clean) >= 3 and clean not in STOPWORDS and not clean.isdigit():
-            keywords.add(clean)
-    return keywords
+    jd_skills = jd_features["skills"]
 
+    # --- Skill scoring with section-aware weighting ---
+    matched_weighted = extract_skills_with_weights(resume_text, jd_skills)
 
-def extract_education(text: str) -> Tuple[float, List[str]]:
-    """
-    Detect education level from text.
-    Returns (highest_weight, list_of_matched_terms).
-    """
-    matched = []
-    max_weight = 0.0
-    for edu_key, weight in EDUCATION_KEYWORDS.items():
-        # Allow flexible matching (e.g., "btech" matches "b.tech")
-        pattern = r"(?<!\w)" + re.escape(edu_key) + r"(?!\w)"
-        if re.search(pattern, text):
-            matched.append(edu_key)
-            if weight > max_weight:
-                max_weight = weight
-    return max_weight, matched
+    if jd_skills:
+        # Each skill contributes proportionally; max possible = len(jd_skills) * 1.0
+        raw_skill_score = sum(matched_weighted.values()) / len(jd_skills)
+        skill_score = min(raw_skill_score * 100, 100.0)
+    else:
+        skill_score = 0.0
 
+    matched_skills = sorted(matched_weighted.keys())
+    missing_skills = sorted(jd_skills - set(matched_weighted.keys()))
 
-def extract_experience_years(text: str) -> float:
-    """
-    Extract years of experience from text using regex patterns.
-    Returns maximum found value.
-    """
-    patterns = [
-        r"(\d+)\+?\s*(?:to\s*\d+\s*)?years?\s*(?:of\s*)?(?:experience|exp|work)",
-        r"experience\s*(?:of\s*)?(\d+)\+?\s*years?",
-        r"(\d+)\+?\s*years?\s*(?:of\s*)?(?:relevant|total|work|industry)",
-        r"minimum\s*(?:of\s*)?(\d+)\+?\s*years?",
-        r"atleast\s*(\d+)\+?\s*years?",
-        r"(\d+)\s*-\s*(\d+)\s*years?",   # range: capture max
-    ]
-    values: List[float] = []
-    for pattern in patterns:
-        for match in re.finditer(pattern, text):
-            # For range pattern, take the larger value
-            groups = [g for g in match.groups() if g is not None]
-            for g in groups:
-                try:
-                    values.append(float(g))
-                except ValueError:
-                    pass
-    return max(values) if values else 0.0
+    # --- Education & Experience ---
+    education_score = score_education(resume_text)
+    experience_score = score_experience(resume_text)
 
+    # --- Weighted total ---
+    w_skill = weights["skills"] / 100
+    w_edu = weights["education"] / 100
+    w_exp = weights["experience"] / 100
 
-def extract_features(text: str) -> Dict:
-    """
-    Master feature extractor. Runs all sub-extractors on normalized text.
-    Returns a structured feature dict used for similarity computation.
-    """
-    norm = normalize_text(text)
-    skills = extract_skills(norm)
-    keywords = extract_keywords(norm)
-    edu_weight, edu_matches = extract_education(norm)
-    exp_years = extract_experience_years(norm)
-
-    return {
-        "raw_text": norm,
-        "skills": skills,
-        "keywords": keywords - skills,  # avoid double-counting skills in keywords
-        "education_weight": edu_weight,
-        "education_matches": edu_matches,
-        "experience_years": exp_years,
-    }
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 4 — SIMILARITY COMPUTATION
-# ══════════════════════════════════════════════════════════════════════════════
-
-def skill_similarity(jd_skills: Set[str], resume_skills: Set[str]) -> float:
-    """
-    Jaccard-style: intersection / |JD skills|.
-    Rewards covering what the JD needs rather than raw overlap.
-    """
-    if not jd_skills:
-        return 0.0
-    intersection = jd_skills & resume_skills
-    return len(intersection) / len(jd_skills)
-
-
-def keyword_similarity(jd_kw: Set[str], resume_kw: Set[str]) -> float:
-    """
-    Overlap ratio: how many JD keywords appear in the resume.
-    """
-    if not jd_kw:
-        return 0.0
-    intersection = jd_kw & resume_kw
-    return len(intersection) / len(jd_kw)
-
-
-def education_similarity(jd_edu: float, resume_edu: float) -> float:
-    """
-    Compare education level weights.
-    Full mark if resume >= JD level, partial if within 0.2, else 0.
-    """
-    if jd_edu == 0.0:
-        return 1.0  # JD doesn't specify — no penalty
-    if resume_edu >= jd_edu:
-        return 1.0
-    gap = jd_edu - resume_edu
-    if gap <= 0.2:
-        return 0.5
-    return 0.0
-
-
-def experience_similarity(jd_exp: float, resume_exp: float) -> float:
-    """
-    Normalized difference score.
-    score = max(0, 1 - |JD_exp - Resume_exp| / JD_exp)
-    If JD requires 0 years, full score for everyone.
-    """
-    if jd_exp == 0.0:
-        return 1.0
-    diff = abs(jd_exp - resume_exp)
-    score = max(0.0, 1.0 - diff / jd_exp)
-    return score
-
-
-def compute_similarity(jd_features: Dict, resume_features: Dict) -> Dict:
-    """
-    Compute weighted similarity between a resume and a JD.
-    Returns individual component scores and final weighted score.
-    """
-    s_skill = skill_similarity(jd_features["skills"], resume_features["skills"])
-    s_kw = keyword_similarity(jd_features["keywords"], resume_features["keywords"])
-    s_edu = education_similarity(
-        jd_features["education_weight"], resume_features["education_weight"]
-    )
-    s_exp = experience_similarity(
-        jd_features["experience_years"], resume_features["experience_years"]
-    )
-
-    final = (
-        WEIGHTS["skills"] * s_skill
-        + WEIGHTS["keywords"] * s_kw
-        + WEIGHTS["education"] * s_edu
-        + WEIGHTS["experience"] * s_exp
+    total = (
+        skill_score * w_skill
+        + education_score * w_edu
+        + experience_score * w_exp
     )
 
     return {
-        "final": round(final * 100, 2),
-        "skill_score": round(s_skill * 100, 2),
-        "keyword_score": round(s_kw * 100, 2),
-        "education_score": round(s_edu * 100, 2),
-        "experience_score": round(s_exp * 100, 2),
-        "matched_skills": list(jd_features["skills"] & resume_features["skills"]),
-        "missing_skills": list(jd_features["skills"] - resume_features["skills"]),
+        "total": round(total, 1),
+        "skill_score": round(skill_score, 1),
+        "education_score": round(education_score, 1),
+        "experience_score": round(experience_score, 1),
+        "matched_skills": matched_skills,
+        "missing_skills": missing_skills,
     }
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 5 — CLUSTER-BASED MATCHING ENGINE
-# ══════════════════════════════════════════════════════════════════════════════
 
-def build_match_matrix(
-    jd_features_list: List[Dict],
-    resume_features_list: List[Dict],
-) -> List[List[Dict]]:
+# ---------------------------------------------------------------------------
+# Clustering: assign each resume to its best-fit JD
+# ---------------------------------------------------------------------------
+
+def cluster_resumes_to_jds(
+    resumes: list[dict],
+    jd_list: list[dict],
+    weights: dict,
+    top_n: int,
+) -> dict[str, list[dict]]:
     """
-    Build NxM matrix: matrix[i][j] = similarity(resume_i, jd_j).
-    Precomputed once for efficiency.
+    Assign each resume to exactly one JD (best match, no duplication).
+    Returns {jd_name: [candidate_result, ...]} sorted by score desc, capped at top_n.
+
+    Each candidate_result = {
+        "name": str,
+        "score_data": dict,
+    }
     """
-    matrix = []
-    for res_feat in resume_features_list:
-        row = [compute_similarity(jd_feat, res_feat) for jd_feat in jd_features_list]
-        matrix.append(row)
-    return matrix
-
-
-def assign_clusters(
-    match_matrix: List[List[Dict]],
-    resume_names: List[str],
-    jd_names: List[str],
-) -> Dict[str, List[Dict]]:
-    """
-    CLUSTER ASSIGNMENT:
-    Each resume is assigned to exactly one JD (the one with max score).
-    Returns a dict: { jd_name -> list of {candidate, scores, breakdown} }
-    """
-    clusters: Dict[str, List[Dict]] = defaultdict(list)
-
-    for i, res_name in enumerate(resume_names):
-        scores_per_jd = match_matrix[i]
-        # Find JD index with maximum final score
-        best_jd_idx = max(range(len(jd_names)), key=lambda j: scores_per_jd[j]["final"])
-        best_score_detail = scores_per_jd[best_jd_idx]
-
-        clusters[jd_names[best_jd_idx]].append({
-            "candidate": res_name,
-            "final_score": best_score_detail["final"],
-            "skill_score": best_score_detail["skill_score"],
-            "keyword_score": best_score_detail["keyword_score"],
-            "education_score": best_score_detail["education_score"],
-            "experience_score": best_score_detail["experience_score"],
-            "matched_skills": best_score_detail["matched_skills"],
-            "missing_skills": best_score_detail["missing_skills"],
-            # Store all JD scores for the matrix display
-            "all_scores": {
-                jd_names[j]: scores_per_jd[j]["final"]
-                for j in range(len(jd_names))
-            },
-        })
-
-    # Sort each cluster by final score descending
-    for jd_name in clusters:
-        clusters[jd_name].sort(key=lambda x: x["final_score"], reverse=True)
-
-    return dict(clusters)
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 6 — STREAMLIT UI
-# ══════════════════════════════════════════════════════════════════════════════
-
-def setup_page():
-    """Configure Streamlit page with custom styling."""
-    st.set_page_config(
-        page_title="ATS Cluster Engine",
-        page_icon="🎯",
-        layout="wide",
-        initial_sidebar_state="expanded",
-    )
-
-    st.markdown("""
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600;700&display=swap');
-
-    :root {
-        --bg: #0d0f14;
-        --surface: #161921;
-        --surface2: #1e222d;
-        --border: #2a2f3d;
-        --accent: #00d4ff;
-        --accent2: #7c3aed;
-        --accent3: #10b981;
-        --warn: #f59e0b;
-        --danger: #ef4444;
-        --text: #e2e8f0;
-        --muted: #64748b;
-        --mono: 'Space Mono', monospace;
-        --sans: 'DM Sans', sans-serif;
-    }
-
-    html, body, [class*="css"] {
-        font-family: var(--sans);
-        background: var(--bg);
-        color: var(--text);
-    }
-
-    /* Sidebar */
-    [data-testid="stSidebar"] {
-        background: var(--surface) !important;
-        border-right: 1px solid var(--border) !important;
-    }
-    [data-testid="stSidebar"] * { color: var(--text) !important; }
-
-    /* Hide default Streamlit chrome */
-    #MainMenu, footer, header { visibility: hidden; }
-
-    /* Uploader */
-    [data-testid="stFileUploader"] {
-        background: var(--surface2);
-        border: 1px dashed var(--border);
-        border-radius: 10px;
-        padding: 10px;
-    }
-    [data-testid="stFileUploader"]:hover {
-        border-color: var(--accent);
-    }
-
-    /* Buttons */
-    .stButton > button {
-        font-family: var(--mono) !important;
-        background: linear-gradient(135deg, var(--accent2), var(--accent)) !important;
-        color: #fff !important;
-        border: none !important;
-        border-radius: 8px !important;
-        padding: 12px 32px !important;
-        font-size: 0.9rem !important;
-        letter-spacing: 0.05em !important;
-        font-weight: 700 !important;
-        transition: all 0.2s !important;
-        width: 100%;
-    }
-    .stButton > button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 8px 24px rgba(0, 212, 255, 0.25) !important;
-    }
-
-    /* Sliders */
-    [data-testid="stSlider"] > div > div {
-        color: var(--accent) !important;
-    }
-
-    /* Score cards */
-    .score-card {
-        background: var(--surface2);
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        padding: 16px;
-        margin: 8px 0;
-        transition: border-color 0.2s;
-    }
-    .score-card:hover { border-color: var(--accent); }
-
-    .rank-badge {
-        font-family: var(--mono);
-        background: var(--accent2);
-        color: white;
-        border-radius: 50%;
-        width: 28px; height: 28px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 0.75rem;
-        font-weight: 700;
-        margin-right: 8px;
-    }
-
-    .jd-header {
-        font-family: var(--mono);
-        background: linear-gradient(90deg, var(--surface2), transparent);
-        border-left: 3px solid var(--accent);
-        padding: 12px 16px;
-        border-radius: 4px;
-        margin: 20px 0 12px 0;
-        font-size: 0.95rem;
-        letter-spacing: 0.08em;
-        color: var(--accent);
-    }
-
-    .metric-pill {
-        display: inline-block;
-        background: var(--surface);
-        border: 1px solid var(--border);
-        border-radius: 20px;
-        padding: 2px 10px;
-        font-size: 0.72rem;
-        font-family: var(--mono);
-        margin: 2px;
-        color: var(--muted);
-    }
-
-    .skill-tag {
-        display: inline-block;
-        background: rgba(0, 212, 255, 0.1);
-        border: 1px solid rgba(0, 212, 255, 0.3);
-        color: var(--accent);
-        border-radius: 4px;
-        padding: 1px 8px;
-        font-size: 0.7rem;
-        font-family: var(--mono);
-        margin: 2px;
-    }
-
-    .missing-tag {
-        display: inline-block;
-        background: rgba(239, 68, 68, 0.1);
-        border: 1px solid rgba(239, 68, 68, 0.25);
-        color: #f87171;
-        border-radius: 4px;
-        padding: 1px 8px;
-        font-size: 0.7rem;
-        font-family: var(--mono);
-        margin: 2px;
-    }
-
-    .progress-bar-outer {
-        background: var(--border);
-        border-radius: 4px;
-        height: 6px;
-        width: 100%;
-        overflow: hidden;
-    }
-    .progress-bar-inner {
-        height: 100%;
-        border-radius: 4px;
-        background: linear-gradient(90deg, var(--accent2), var(--accent));
-        transition: width 0.4s ease;
-    }
-
-    /* Matrix table */
-    .matrix-table {
-        width: 100%;
-        border-collapse: collapse;
-        font-family: var(--mono);
-        font-size: 0.78rem;
-    }
-    .matrix-table th {
-        background: var(--surface2);
-        color: var(--accent);
-        padding: 8px 12px;
-        text-align: left;
-        border-bottom: 2px solid var(--border);
-    }
-    .matrix-table td {
-        padding: 7px 12px;
-        border-bottom: 1px solid var(--border);
-        color: var(--text);
-    }
-    .matrix-table tr:hover td { background: var(--surface2); }
-    .cell-high { color: var(--accent3) !important; font-weight: 700; }
-    .cell-mid { color: var(--warn) !important; }
-    .cell-low { color: var(--muted) !important; }
-
-    .hero-title {
-        font-family: var(--mono);
-        font-size: 2.2rem;
-        font-weight: 700;
-        background: linear-gradient(135deg, #ffffff 0%, var(--accent) 60%, var(--accent2) 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        letter-spacing: -0.02em;
-        line-height: 1.1;
-    }
-
-    .stat-box {
-        background: var(--surface2);
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        padding: 16px;
-        text-align: center;
-    }
-    .stat-val {
-        font-family: var(--mono);
-        font-size: 2rem;
-        font-weight: 700;
-        color: var(--accent);
-    }
-    .stat-label {
-        font-size: 0.75rem;
-        color: var(--muted);
-        text-transform: uppercase;
-        letter-spacing: 0.1em;
-    }
-
-    div[data-testid="stExpander"] {
-        background: var(--surface2) !important;
-        border: 1px solid var(--border) !important;
-        border-radius: 10px !important;
-    }
-
-    </style>
-    """, unsafe_allow_html=True)
-
-
-def render_score_bar(score: float, label: str, color: str = "var(--accent)"):
-    """Render a labeled progress bar for a score component."""
-    bar_style = f"width:{score:.1f}%; background: linear-gradient(90deg, {color}88, {color});"
-    st.markdown(f"""
-    <div style="margin:4px 0;">
-      <div style="display:flex; justify-content:space-between; font-size:0.72rem; margin-bottom:3px;">
-        <span style="color:var(--muted); font-family:var(--mono);">{label}</span>
-        <span style="color:{color}; font-family:var(--mono); font-weight:700;">{score:.1f}%</span>
-      </div>
-      <div class="progress-bar-outer">
-        <div class="progress-bar-inner" style="{bar_style}"></div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-
-def render_candidate_card(rank: int, candidate: Dict, show_details: bool):
-    """Render a single candidate result card."""
-    score = candidate["final_score"]
-    color = (
-        "var(--accent3)" if score >= 70
-        else "var(--warn)" if score >= 40
-        else "var(--danger)"
-    )
-
-    with st.container():
-        col_a, col_b = st.columns([4, 1])
-        with col_a:
-            st.markdown(
-                f'<span class="rank-badge">#{rank}</span>'
-                f'<span style="font-weight:600; font-size:0.95rem;">{candidate["candidate"]}</span>',
-                unsafe_allow_html=True,
+    # Step 1: Score every resume against every JD
+    all_scores = []  # (resume_idx, jd_idx, score)
+    for r_idx, resume in enumerate(resumes):
+        for j_idx, jd in enumerate(jd_list):
+            score_data = score_resume_against_jd(
+                resume["text"], jd["features"], weights
             )
-        with col_b:
-            st.markdown(
-                f'<div style="text-align:right; font-family:var(--mono); font-size:1.3rem;'
-                f'font-weight:700; color:{color};">{score:.1f}%</div>',
-                unsafe_allow_html=True,
-            )
+            all_scores.append((r_idx, j_idx, score_data["total"], score_data))
 
-        render_score_bar(candidate["skill_score"], "Skills (50%)", "var(--accent)")
-        render_score_bar(candidate["keyword_score"], "Keywords (20%)", "var(--accent2)")
-        render_score_bar(candidate["education_score"], "Education (15%)", "var(--accent3)")
-        render_score_bar(candidate["experience_score"], "Experience (15%)", "var(--warn)")
+    # Step 2: Sort by score descending for greedy assignment
+    all_scores.sort(key=lambda x: x[2], reverse=True)
 
-        if show_details:
-            # Matched skills
-            if candidate["matched_skills"]:
-                tags = " ".join(
-                    f'<span class="skill-tag">{s}</span>'
-                    for s in sorted(candidate["matched_skills"])
-                )
-                st.markdown(
-                    f'<div style="margin-top:8px;"><span style="font-size:0.7rem;'
-                    f'color:var(--muted); font-family:var(--mono);">✓ MATCHED </span>{tags}</div>',
-                    unsafe_allow_html=True,
-                )
-            # Missing skills
-            if candidate["missing_skills"]:
-                tags = " ".join(
-                    f'<span class="missing-tag">{s}</span>'
-                    for s in sorted(candidate["missing_skills"])[:8]
-                )
-                st.markdown(
-                    f'<div style="margin-top:4px;"><span style="font-size:0.7rem;'
-                    f'color:var(--muted); font-family:var(--mono);">✗ MISSING </span>{tags}</div>',
-                    unsafe_allow_html=True,
-                )
+    assigned_resumes = set()
+    jd_assignments = defaultdict(list)
 
-        st.markdown("<hr style='border-color:var(--border); margin:10px 0;'>", unsafe_allow_html=True)
+    for r_idx, j_idx, score, score_data in all_scores:
+        if r_idx in assigned_resumes:
+            continue
+        jd_name = jd_list[j_idx]["name"]
+        # Only assign if this JD still has capacity
+        if len(jd_assignments[jd_name]) < top_n:
+            jd_assignments[jd_name].append({
+                "name": resumes[r_idx]["name"],
+                "score_data": score_data,
+            })
+            assigned_resumes.add(r_idx)
 
+        if len(assigned_resumes) == len(resumes):
+            break
 
-def render_match_matrix(
-    match_matrix: List[List[Dict]],
-    resume_names: List[str],
-    jd_names: List[str],
-):
-    """Render the full similarity matrix as an HTML table."""
-    header_cells = "".join(
-        f'<th title="{jd}">{jd[:18]}{"…" if len(jd) > 18 else ""}</th>'
-        for jd in jd_names
-    )
-    header = f"<tr><th>Candidate</th>{header_cells}<th>Best JD</th></tr>"
-
-    rows = []
-    for i, res_name in enumerate(resume_names):
-        scores = [match_matrix[i][j]["final"] for j in range(len(jd_names))]
-        best_j = scores.index(max(scores))
-        cells = ""
-        for j, sc in enumerate(scores):
-            css = "cell-high" if j == best_j else ("cell-mid" if sc >= 40 else "cell-low")
-            bold = "font-weight:700;" if j == best_j else ""
-            cells += f'<td class="{css}" style="{bold}">{sc:.0f}%</td>'
-        short_name = res_name[:30] + ("…" if len(res_name) > 30 else "")
-        best_jd_short = jd_names[best_j][:20]
-        rows.append(
-            f"<tr><td>{short_name}</td>{cells}"
-            f'<td style="color:var(--accent);font-weight:700;">{best_jd_short}</td></tr>'
+    # Sort each JD's candidates by score descending
+    for jd_name in jd_assignments:
+        jd_assignments[jd_name].sort(
+            key=lambda x: x["score_data"]["total"], reverse=True
         )
 
-    html = f"""
-    <div style="overflow-x:auto; background:var(--surface); border-radius:10px;
-                border:1px solid var(--border); padding:16px; margin-top:12px;">
-        <table class="matrix-table">
-            <thead>{header}</thead>
-            <tbody>{"".join(rows)}</tbody>
-        </table>
-    </div>
+    return dict(jd_assignments)
+
+
+# ---------------------------------------------------------------------------
+# Word Report Generation
+# ---------------------------------------------------------------------------
+
+def _add_heading(doc: Document, text: str, level: int = 1, color=None):
+    """Add a styled heading paragraph."""
+    heading = doc.add_heading(text, level=level)
+    run = heading.runs[0] if heading.runs else heading.add_run(text)
+    if color:
+        run.font.color.rgb = RGBColor(*color)
+    return heading
+
+
+def _add_horizontal_rule(doc: Document):
+    """Add a thin horizontal line using paragraph border."""
+    p = doc.add_paragraph()
+    pPr = p._p.get_or_add_pPr()
+    pBdr = OxmlElement("w:pBdr")
+    bottom = OxmlElement("w:bottom")
+    bottom.set(qn("w:val"), "single")
+    bottom.set(qn("w:sz"), "6")
+    bottom.set(qn("w:space"), "1")
+    bottom.set(qn("w:color"), "CCCCCC")
+    pBdr.append(bottom)
+    pPr.append(pBdr)
+    return p
+
+
+def _add_score_row(doc: Document, label: str, value: str):
+    """Add a label: value line in a paragraph."""
+    p = doc.add_paragraph()
+    run_label = p.add_run(f"{label}: ")
+    run_label.bold = True
+    p.add_run(value)
+    return p
+
+
+def _add_bullet_list(doc: Document, items: list[str], style: str = "List Bullet"):
+    """Add items as bullet list paragraphs."""
+    for item in items:
+        try:
+            doc.add_paragraph(item, style=style)
+        except Exception:
+            p = doc.add_paragraph()
+            p.add_run(f"• {item}")
+
+
+def generate_jd_report(jd_name: str, candidates: list[dict]) -> bytes:
     """
-    st.markdown(html, unsafe_allow_html=True)
+    Generate a Word document report for a single JD.
+    Returns bytes of the .docx file.
+    """
+    doc = Document()
+
+    # --- Page margins ---
+    for section in doc.sections:
+        section.top_margin = Inches(1)
+        section.bottom_margin = Inches(1)
+        section.left_margin = Inches(1.2)
+        section.right_margin = Inches(1.2)
+
+    # --- Document title ---
+    title = doc.add_heading(f"Hiring Report — {jd_name}", level=0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    if title.runs:
+        title.runs[0].font.color.rgb = RGBColor(0x1F, 0x45, 0x7C)
+
+    doc.add_paragraph()  # spacer
+
+    if not candidates:
+        p = doc.add_paragraph("No suitable candidates found for this role.")
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    else:
+        summary_para = doc.add_paragraph()
+        summary_para.add_run(f"Total Candidates Selected: ").bold = True
+        summary_para.add_run(str(len(candidates)))
+        doc.add_paragraph()
+
+        for idx, candidate in enumerate(candidates, 1):
+            name = candidate["name"]
+            sd = candidate["score_data"]
+
+            # Candidate header
+            cand_heading = doc.add_heading(f"{idx}. {name}", level=2)
+            if cand_heading.runs:
+                cand_heading.runs[0].font.color.rgb = RGBColor(0x2E, 0x74, 0xB5)
+
+            # Match score (prominent)
+            score_para = doc.add_paragraph()
+            score_run = score_para.add_run(f"Match Score: {sd['total']}%")
+            score_run.bold = True
+            score_run.font.size = Pt(13)
+            score_run.font.color.rgb = RGBColor(0x37, 0x86, 0x3C)
+
+            # Score breakdown
+            breakdown_heading = doc.add_paragraph()
+            breakdown_heading.add_run("Score Breakdown:").bold = True
+
+            _add_score_row(doc, "  Skills", f"{sd['skill_score']}%")
+            _add_score_row(doc, "  Education", f"{sd['education_score']}%")
+            _add_score_row(doc, "  Experience", f"{sd['experience_score']}%")
+
+            doc.add_paragraph()  # spacer
+
+            # Matched skills
+            matched_heading = doc.add_paragraph()
+            matched_heading.add_run("Matched Skills:").bold = True
+
+            if sd["matched_skills"]:
+                # Show up to 20 most relevant matched skills
+                _add_bullet_list(doc, sd["matched_skills"][:20])
+            else:
+                doc.add_paragraph("  None detected")
+
+            # Missing skills
+            missing_heading = doc.add_paragraph()
+            missing_heading.add_run("Missing Skills:").bold = True
+
+            if sd["missing_skills"]:
+                # Show up to 20 most critical missing skills
+                _add_bullet_list(doc, sd["missing_skills"][:20])
+            else:
+                doc.add_paragraph("  None — all JD skills matched")
+
+            _add_horizontal_rule(doc)
+            doc.add_paragraph()  # spacer between candidates
+
+    # --- Save to bytes ---
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 7 — MAIN APPLICATION
-# ══════════════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
+# Streamlit UI
+# ---------------------------------------------------------------------------
 
 def main():
-    setup_page()
+    st.set_page_config(
+        page_title="ATS — Resume Screener",
+        page_icon="📋",
+        layout="centered",
+    )
 
-    # ── Header ────────────────────────────────────────────────────────────────
-    st.markdown("""
-    <div style="padding: 32px 0 24px 0;">
-        <div class="hero-title">ATS CLUSTER ENGINE</div>
-        <div style="color:var(--muted); font-family:var(--mono); font-size:0.8rem;
-                    letter-spacing:0.15em; margin-top:6px;">
-            DETERMINISTIC · CLUSTER-BASED · EXPLAINABLE MATCHING
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    # Minimal CSS
+    st.markdown(
+        """
+        <style>
+        .block-container { max-width: 780px; padding-top: 2rem; }
+        h1 { color: #1F457C; }
+        .stAlert { border-radius: 6px; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    # ── Sidebar Controls ──────────────────────────────────────────────────────
-    with st.sidebar:
-        st.markdown("""
-        <div style="font-family:var(--mono); font-size:0.7rem; color:var(--accent);
-                    letter-spacing:0.15em; margin-bottom:16px;">⚙ CONFIGURATION</div>
-        """, unsafe_allow_html=True)
+    st.title("📋 ATS Resume Screener")
+    st.caption("Upload job descriptions and resumes. Get ranked Word reports per JD.")
 
-        top_n = st.slider("Top N candidates per JD", min_value=1, max_value=20, value=5)
-        show_details = st.toggle("Show skill breakdown", value=True)
-        show_matrix = st.toggle("Show match matrix", value=True)
+    st.divider()
 
-        st.markdown("---")
-        st.markdown("""
-        <div style="font-family:var(--mono); font-size:0.7rem; color:var(--muted);
-                    letter-spacing:0.1em;">SCORE WEIGHTS</div>
-        """, unsafe_allow_html=True)
+    # ── 1. Upload Job Descriptions ──────────────────────────────────────────
+    st.subheader("1 · Job Descriptions")
+    jd_files = st.file_uploader(
+        "Upload JDs (PDF, DOCX, or TXT)",
+        type=["pdf", "docx", "txt"],
+        accept_multiple_files=True,
+        key="jd_uploader",
+    )
 
-        for k, v in WEIGHTS.items():
-            st.markdown(
-                f'<div style="display:flex; justify-content:space-between; '
-                f'font-size:0.75rem; padding:3px 0;">'
-                f'<span style="color:var(--muted);">{k.capitalize()}</span>'
-                f'<span style="font-family:var(--mono); color:var(--accent);">{int(v*100)}%</span></div>',
-                unsafe_allow_html=True,
-            )
+    # ── 2. Upload Resumes ───────────────────────────────────────────────────
+    st.subheader("2 · Resumes")
+    resume_files = st.file_uploader(
+        "Upload Resumes (PDF, DOCX, or TXT)",
+        type=["pdf", "docx", "txt"],
+        accept_multiple_files=True,
+        key="resume_uploader",
+    )
 
-        st.markdown("---")
-        st.markdown("""
-        <div style="font-size:0.7rem; color:var(--muted); font-family:var(--mono);">
-        Supported: PDF · DOCX<br>
-        Algorithm: Cluster-Based Jaccard<br>
-        No AI · No APIs · Deterministic
-        </div>
-        """, unsafe_allow_html=True)
+    st.divider()
 
-    # ── File Upload Area ──────────────────────────────────────────────────────
-    col1, col2 = st.columns(2, gap="large")
+    # ── 3. Top N Slider ─────────────────────────────────────────────────────
+    st.subheader("3 · Top Candidates per JD")
+    top_n = st.slider("Select top N candidates per JD", 1, 20, 5)
 
+    st.divider()
+
+    # ── 4. Scoring Weights ──────────────────────────────────────────────────
+    st.subheader("4 · Scoring Weights")
+    st.caption("Adjust the importance of each dimension. Total must equal 100.")
+
+    col1, col2, col3 = st.columns(3)
     with col1:
-        st.markdown("""
-        <div style="font-family:var(--mono); font-size:0.75rem; color:var(--accent);
-                    letter-spacing:0.12em; margin-bottom:8px;">📋 JOB DESCRIPTIONS</div>
-        """, unsafe_allow_html=True)
-        jd_files = st.file_uploader(
-            "Upload JD files",
-            type=["pdf", "docx"],
-            accept_multiple_files=True,
-            label_visibility="collapsed",
-            key="jd_upload",
-        )
-        if jd_files:
-            st.markdown(
-                f'<div style="font-size:0.75rem; color:var(--accent3); '
-                f'font-family:var(--mono);">✓ {len(jd_files)} JD(s) loaded</div>',
-                unsafe_allow_html=True,
-            )
-
+        w_skills = st.slider("Skills %", 0, 100, 60, step=5)
     with col2:
-        st.markdown("""
-        <div style="font-family:var(--mono); font-size:0.75rem; color:var(--accent);
-                    letter-spacing:0.12em; margin-bottom:8px;">📄 RESUMES</div>
-        """, unsafe_allow_html=True)
-        resume_files = st.file_uploader(
-            "Upload Resume files",
-            type=["pdf", "docx"],
-            accept_multiple_files=True,
-            label_visibility="collapsed",
-            key="resume_upload",
-        )
-        if resume_files:
-            st.markdown(
-                f'<div style="font-size:0.75rem; color:var(--accent3); '
-                f'font-family:var(--mono);">✓ {len(resume_files)} resume(s) loaded</div>',
-                unsafe_allow_html=True,
-            )
+        w_education = st.slider("Education %", 0, 100, 20, step=5)
+    with col3:
+        w_experience = st.slider("Experience %", 0, 100, 20, step=5)
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    analyze_clicked = st.button("⚡ RUN CLUSTER ANALYSIS", use_container_width=True)
+    total_weight = w_skills + w_education + w_experience
+    weight_ok = total_weight == 100
 
-    # ── Analysis ──────────────────────────────────────────────────────────────
-    if analyze_clicked:
+    if total_weight != 100:
+        st.warning(f"⚠️ Weights total {total_weight}%. Please adjust so they sum to 100%.")
+    else:
+        st.success("✅ Weights sum to 100%")
+
+    st.divider()
+
+    # ── 5. Generate Button ──────────────────────────────────────────────────
+    generate = st.button("📄 Generate Hiring Report", type="primary", use_container_width=True)
+
+    if generate:
+        # Validation
         if not jd_files:
             st.error("Please upload at least one Job Description.")
             return
         if not resume_files:
             st.error("Please upload at least one Resume.")
             return
+        if not weight_ok:
+            st.error("Weights must sum to 100% before generating reports.")
+            return
 
-        # ── Step 1: Extract & Preprocess JDs ──────────────────────────────
-        with st.spinner("Parsing Job Descriptions…"):
-            jd_features_list: List[Dict] = []
-            jd_names: List[str] = []
-            jd_raw_texts: List[str] = []
+        weights = {
+            "skills": w_skills,
+            "education": w_education,
+            "experience": w_experience,
+        }
 
-            for jd_file in jd_files:
-                raw = extract_text(jd_file.read(), jd_file.name)
-                jd_raw_texts.append(raw)
-                feats = extract_features(raw)
-                jd_features_list.append(feats)
-                # Use filename (without extension) as JD label
-                label = jd_file.name.rsplit(".", 1)[0].replace("_", " ").replace("-", " ")
-                jd_names.append(label)
+        # ── Parse JDs (once) ────────────────────────────────────────────────
+        with st.spinner("Parsing job descriptions…"):
+            jd_list = []
+            for f in jd_files:
+                text = extract_text(f)
+                if not text.strip():
+                    st.warning(f"⚠️ Could not extract text from JD: {f.name}")
+                    continue
+                name = f.name.rsplit(".", 1)[0]
+                features = extract_jd_features(text)
+                jd_list.append({"name": name, "text": text, "features": features})
 
-        # ── Step 2: Extract & Preprocess Resumes ──────────────────────────
-        with st.spinner("Parsing Resumes…"):
-            resume_features_list: List[Dict] = []
-            resume_names: List[str] = []
+        if not jd_list:
+            st.error("No valid JDs could be parsed.")
+            return
 
-            for res_file in resume_files:
-                raw = extract_text(res_file.read(), res_file.name)
-                feats = extract_features(raw)
-                resume_features_list.append(feats)
-                resume_names.append(res_file.name)
+        # ── Parse Resumes ───────────────────────────────────────────────────
+        with st.spinner("Parsing resumes…"):
+            resume_list = []
+            for f in resume_files:
+                text = extract_text(f)
+                if not text.strip():
+                    st.warning(f"⚠️ Could not extract text from resume: {f.name}")
+                    continue
+                name = f.name.rsplit(".", 1)[0]
+                resume_list.append({"name": name, "text": text})
 
-        # ── Step 3: Build Match Matrix ─────────────────────────────────────
-        with st.spinner("Computing similarity matrix…"):
-            match_matrix = build_match_matrix(jd_features_list, resume_features_list)
+        if not resume_list:
+            st.error("No valid resumes could be parsed.")
+            return
 
-        # ── Step 4: Cluster Assignment ─────────────────────────────────────
-        clusters = assign_clusters(match_matrix, resume_names, jd_names)
-
-        # ── Summary Stats ──────────────────────────────────────────────────
-        total_assigned = sum(len(v) for v in clusters.values())
-        jds_with_candidates = len([v for v in clusters.values() if v])
-        avg_top_score = (
-            sum(v[0]["final_score"] for v in clusters.values() if v) / jds_with_candidates
-            if jds_with_candidates else 0
-        )
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        sc1, sc2, sc3, sc4 = st.columns(4)
-        with sc1:
-            st.markdown(
-                f'<div class="stat-box"><div class="stat-val">{len(jd_names)}</div>'
-                f'<div class="stat-label">Job Descriptions</div></div>',
-                unsafe_allow_html=True,
-            )
-        with sc2:
-            st.markdown(
-                f'<div class="stat-box"><div class="stat-val">{len(resume_names)}</div>'
-                f'<div class="stat-label">Resumes Analyzed</div></div>',
-                unsafe_allow_html=True,
-            )
-        with sc3:
-            st.markdown(
-                f'<div class="stat-box"><div class="stat-val">{jds_with_candidates}</div>'
-                f'<div class="stat-label">JDs With Matches</div></div>',
-                unsafe_allow_html=True,
-            )
-        with sc4:
-            st.markdown(
-                f'<div class="stat-box"><div class="stat-val">{avg_top_score:.0f}%</div>'
-                f'<div class="stat-label">Avg Top Score</div></div>',
-                unsafe_allow_html=True,
+        # ── Cluster & Score ─────────────────────────────────────────────────
+        with st.spinner("Scoring and assigning candidates…"):
+            assignments = cluster_resumes_to_jds(
+                resume_list, jd_list, weights, top_n
             )
 
-        st.markdown("<br>", unsafe_allow_html=True)
+        # ── Summary Display ─────────────────────────────────────────────────
+        st.divider()
+        st.subheader("Results Summary")
 
-        # ── Match Matrix ───────────────────────────────────────────────────
-        if show_matrix:
-            with st.expander("📊 Full Match Matrix (All Resumes × All JDs)", expanded=False):
-                render_match_matrix(match_matrix, resume_names, jd_names)
-
-        # ── JD-wise Results ────────────────────────────────────────────────
-        st.markdown("""
-        <div style="font-family:var(--mono); font-size:0.75rem; color:var(--accent);
-                    letter-spacing:0.15em; margin:24px 0 8px 0;">
-        ── CLUSTER RESULTS ─────────────────────────────────
-        </div>
-        """, unsafe_allow_html=True)
-
-        for jd_name in jd_names:
-            candidates = clusters.get(jd_name, [])
-
-            # JD header
-            count_label = f"{len(candidates)} candidate(s) assigned"
-            st.markdown(
-                f'<div class="jd-header">🎯 {jd_name.upper()}'
-                f'<span style="color:var(--muted); font-size:0.75rem; margin-left:16px;">'
-                f'{count_label}</span></div>',
-                unsafe_allow_html=True,
-            )
-
-            # JD feature summary
-            jd_idx = jd_names.index(jd_name)
-            jd_feat = jd_features_list[jd_idx]
-
-            col_feat1, col_feat2 = st.columns(2)
-            with col_feat1:
-                if jd_feat["skills"]:
-                    skill_tags = " ".join(
-                        f'<span class="metric-pill">{s}</span>'
-                        for s in sorted(jd_feat["skills"])[:12]
-                    )
-                    st.markdown(
-                        f'<div style="font-size:0.7rem; color:var(--muted); '
-                        f'font-family:var(--mono); margin-bottom:4px;">JD SKILLS DETECTED</div>'
-                        f'{skill_tags}',
-                        unsafe_allow_html=True,
-                    )
-            with col_feat2:
-                edu = jd_feat["education_matches"]
-                exp = jd_feat["experience_years"]
-                st.markdown(
-                    f'<span class="metric-pill">Education: {", ".join(edu[:3]) if edu else "Not specified"}</span>'
-                    f'<span class="metric-pill">Experience: {exp:.0f}+ yrs</span>',
-                    unsafe_allow_html=True,
-                )
-
-            if not candidates:
-                st.markdown(
-                    '<div style="color:var(--muted); font-size:0.8rem; padding:12px 0; '
-                    'font-family:var(--mono);">No candidates were assigned to this JD cluster.</div>',
-                    unsafe_allow_html=True,
-                )
+        for jd in jd_list:
+            candidates = assignments.get(jd["name"], [])
+            count = len(candidates)
+            if count == 0:
+                st.info(f"**{jd['name']}** → No suitable candidates found")
             else:
-                top_candidates = candidates[:top_n]
-                for rank, cand in enumerate(top_candidates, 1):
-                    render_candidate_card(rank, cand, show_details)
+                st.success(f"**{jd['name']}** → {count} candidate(s) selected")
 
-            st.markdown("<br>", unsafe_allow_html=True)
+        # ── Generate & Offer Downloads ──────────────────────────────────────
+        st.divider()
+        st.subheader("Download Reports")
 
-        # ── Unmatched JDs ──────────────────────────────────────────────────
-        empty_jds = [jd for jd in jd_names if not clusters.get(jd)]
-        if empty_jds:
-            st.warning(
-                f"⚠ {len(empty_jds)} JD(s) received no candidates: "
-                + ", ".join(empty_jds)
+        any_report = False
+        for jd in jd_list:
+            candidates = assignments.get(jd["name"], [])
+            if not candidates:
+                continue
+
+            any_report = True
+            report_bytes = generate_jd_report(jd["name"], candidates)
+            safe_name = re.sub(r"[^\w\-_]", "_", jd["name"])
+
+            st.download_button(
+                label=f"⬇️ Download Report — {jd['name']}",
+                data=report_bytes,
+                file_name=f"{safe_name}_report.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
             )
 
-        # ── JD Feature Inspector ───────────────────────────────────────────
-        with st.expander("🔍 JD Feature Inspector", expanded=False):
-            for jd_name, jd_feat in zip(jd_names, jd_features_list):
-                st.markdown(f"**{jd_name}**")
-                ic1, ic2, ic3, ic4 = st.columns(4)
-                ic1.metric("Skills Found", len(jd_feat["skills"]))
-                ic2.metric("Keywords", len(jd_feat["keywords"]))
-                ic3.metric(
-                    "Education",
-                    jd_feat["education_matches"][0] if jd_feat["education_matches"] else "—",
-                )
-                ic4.metric("Exp Required", f"{jd_feat['experience_years']:.0f} yrs")
-                st.markdown("---")
-
-    else:
-        # Landing state
-        st.markdown("""
-        <div style="text-align:center; padding:60px 0; color:var(--muted);">
-            <div style="font-size:3rem; margin-bottom:16px;">🎯</div>
-            <div style="font-family:var(--mono); font-size:0.85rem; letter-spacing:0.1em;">
-                Upload JDs and Resumes, then click RUN CLUSTER ANALYSIS
-            </div>
-            <div style="font-size:0.75rem; margin-top:12px; max-width:480px;
-                        margin-left:auto; margin-right:auto; line-height:1.6;">
-                Each resume is assigned to exactly one JD using cluster-based
-                similarity. Scoring uses Skills (50%), Keywords (20%),
-                Education (15%), and Experience (15%).
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        if not any_report:
+            st.warning("No candidates were assigned to any JD.")
 
 
 if __name__ == "__main__":
