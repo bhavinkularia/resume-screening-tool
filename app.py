@@ -342,57 +342,82 @@ def extract_text(uploaded_file) -> str:
 
 
 # ===========================================================================
-# CANDIDATE NAME EXTRACTION
-# Scans the first 5 lines for a short, capitalized, name-like line.
-# Falls back to the file stem if nothing plausible is found.
+# CANDIDATE NAME EXTRACTION  (improved)
+# Scans first 10-15 non-empty lines for a short, purely alphabetic,
+# capitalized name line. Falls back to cleaned file stem.
 # ===========================================================================
 
-_NAME_NOISE_RE = re.compile(
-    r"\b(?:resume|cv|curriculum vitae|phone|email|address|linkedin|github|"
-    r"www|http|@|mobile|contact|profile|objective|summary)\b",
-    re.I,
-)
+_NAME_EXCLUDE_WORDS: set[str] = {
+    "academic", "education", "profile", "resume", "experience",
+    "curriculum", "vitae", "objective", "summary", "contact",
+    "phone", "email", "address", "linkedin", "github", "mobile",
+    "www", "http", "about", "skills", "overview", "introduction",
+}
+
+_NAME_NOISE_CHARS_RE = re.compile(r"[^a-zA-Z\s]")
 
 
 def extract_candidate_name(raw_text: str, file_stem: str = "") -> str:
     """
-    Attempt to detect the candidate's name from the top of the resume.
+    Improved candidate name extraction.
 
     Strategy:
-    1. Examine the first 5 non-empty lines.
-    2. A probable name line is:
-       - 1–4 words long
-       - Every word starts with a capital letter (title-cased)
-       - Contains no noise keywords (email, phone, LinkedIn, …)
-       - Contains no digits
-    3. Prefer the earliest such line.
+    1. Scan first 10-15 non-empty lines.
+    2. A valid name line must:
+       - Contain only alphabets and spaces (no digits, no special chars)
+       - Have 2-4 words
+       - NOT contain any excluded section/keyword words
+       - Have all words capitalized (title-case preferred)
+    3. Among valid candidates, prefer lines where all words start with uppercase.
     4. Fallback: clean version of the file stem.
     """
-    lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
-    candidates = lines[:5]
+    lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
+    candidates = lines[:15]
+
+    title_case_matches: list[str] = []
+    any_matches: list[str] = []
 
     for line in candidates:
         # Strip leading bullet / special chars
         line = re.sub(r"^[\W_]+", "", line).strip()
         if not line:
             continue
-        # Must not contain digits
-        if re.search(r"\d", line):
+
+        # Must contain only alphabets and spaces
+        if _NAME_NOISE_CHARS_RE.search(line):
             continue
-        # Must not contain noise keywords
-        if _NAME_NOISE_RE.search(line):
+
+        # Must not contain excluded keywords
+        lower_line = line.lower()
+        if any(excl in lower_line for excl in _NAME_EXCLUDE_WORDS):
             continue
+
         words = line.split()
-        # 1–4 words
-        if not (1 <= len(words) <= 4):
+
+        # Must be 2–4 words
+        if not (2 <= len(words) <= 4):
             continue
-        # Every word title-cased (first char uppercase, rest lowercase or mixed)
-        if all(w[0].isupper() for w in words if w):
-            return " ".join(words)
+
+        # All words must be alphabetic only
+        if not all(w.isalpha() for w in words):
+            continue
+
+        # Prefer title-cased (all words start with uppercase)
+        if all(w[0].isupper() for w in words):
+            title_case_matches.append(" ".join(words))
+        else:
+            any_matches.append(" ".join(words))
+
+    if title_case_matches:
+        return title_case_matches[0]
+    if any_matches:
+        return any_matches[0].title()
 
     # Fallback: humanise the file stem
     if file_stem:
-        name = re.sub(r"[_\-]+", " ", file_stem).strip()
+        name = re.sub(r"[_\-\.]+", " ", file_stem).strip()
+        # Remove file extension remnants
+        name = re.sub(r"\s+(pdf|docx|txt)$", "", name, flags=re.I).strip()
         return name.title()
 
     return "Unknown Candidate"
@@ -624,15 +649,14 @@ def cluster_resumes_to_jds(
 
 
 # ===========================================================================
-# CLAUDE API — SCORE REFINEMENT + INSIGHTS
+# CLAUDE API — SCORE REFINEMENT + CATEGORISED INSIGHTS
 # Sends ONLY structured skill data (no resume / JD text). Token-optimised.
-# One API call per shortlisted candidate; result contains refined scores
-# AND strengths / gaps simultaneously.
+# One API call per shortlisted candidate.
+# Final Score = 70% base + 30% Claude-refined.
 # ===========================================================================
 
 _REFINE_PROMPT_TEMPLATE = """\
-You are an expert recruiter.
-Evaluate candidate alignment using structured data.
+You are an expert recruiter. Evaluate candidate alignment using structured data.
 
 Job Skills: {jd_skills}
 Matched Skills: {matched_skills}
@@ -641,29 +665,40 @@ Missing Skills: {missing_skills}
 Base Scores: Skills: {skill_score} Education: {education_score} Experience: {experience_score}
 
 Instructions:
-* Adjust scores slightly based on relevance
-* Penalize missing critical skills
-* Consider relevance, not just presence
-* Keep scores between 0–100
-* Do not drastically change base scores
+1. Adjust scores slightly (do NOT drastically change)
+2. Consider relevance, not just presence
+3. Penalize missing critical skills
+4. Generate categorized insights:
 
-Also generate:
-* 2–3 Strengths
-* 2–3 Gaps
+Strengths:
+* Skills: ...
+* Education: ...
+* Experience: ...
+* Overall: ...
+
+Gaps:
+* Skills: ...
+* Education: ...
+* Experience: ...
+* Overall: ...
 
 Rules:
 * Each point under 12 words
-* Specific and job-relevant
-* No generic statements
+* Be precise and job-relevant
+* No generic phrases
 
-Output format (use exactly):
+Output format:
 Refined Scores: Skills: XX Education: XX Experience: XX Final: XX
 Strengths:
-* ...
-* ...
+* Skills: ...
+* Education: ...
+* Experience: ...
+* Overall: ...
 Gaps:
-* ...
-* ...\
+* Skills: ...
+* Education: ...
+* Experience: ...
+* Overall: ...\
 """
 
 
@@ -680,7 +715,7 @@ def refine_scores_with_claude(
     """
     Send compact structured data to Claude. Returns:
       refined_skill_score, refined_education_score, refined_experience_score,
-      refined_total, blended_total, strengths, gaps.
+      refined_total, blended_total, strengths (categorised), gaps (categorised).
 
     Blend formula: blended_total = 0.70 × base_total + 0.30 × claude_total
 
@@ -703,7 +738,7 @@ def refine_scores_with_claude(
         client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
         message = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=250,
+            max_tokens=400,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = message.content[0].text.strip()
@@ -724,8 +759,18 @@ def _build_fallback(
         "refined_experience_score": exp,
         "refined_total":            total,
         "blended_total":            total,
-        "strengths": ["Strong alignment with key job requirements"],
-        "gaps":       ["Some required skills are missing or unverified"],
+        "strengths": {
+            "Skills":     "Matched key technical skills for the role",
+            "Education":  "Educational background meets role requirements",
+            "Experience": "Relevant experience aligned with job needs",
+            "Overall":    "Solid overall alignment with position requirements",
+        },
+        "gaps": {
+            "Skills":     "Some required technical skills not verified",
+            "Education":  "Advanced qualification could strengthen candidacy",
+            "Experience": "Additional domain experience may be required",
+            "Overall":    "Minor gaps exist in overall candidate profile",
+        },
     }
 
 
@@ -738,16 +783,25 @@ def _parse_refinement(
     weights: dict,
 ) -> dict:
     """
-    Parse Claude's plain-text output into refined scores + insights.
+    Parse Claude's plain-text output into refined scores + categorised insights.
     Falls back to base values on any parse failure.
+
+    Expects categorised bullets:
+      * Skills: ...
+      * Education: ...
+      * Experience: ...
+      * Overall: ...
     """
     refined_skill = base_skill
     refined_edu   = base_edu
     refined_exp   = base_exp
     refined_total = base_total
-    strengths: list[str] = []
-    gaps:      list[str] = []
-    current:   list[str] | None = None
+
+    strengths: dict[str, str] = {}
+    gaps:      dict[str, str] = {}
+    current_section: str | None = None  # "strengths" or "gaps"
+
+    _CATEGORIES = {"skills", "education", "experience", "overall"}
 
     for line in raw.splitlines():
         line = line.strip()
@@ -767,7 +821,6 @@ def _parse_refinement(
                 refined_skill = _clamp(float(nums[0]))
                 refined_edu   = _clamp(float(nums[1]))
                 refined_exp   = _clamp(float(nums[2]))
-                # Recompute total from refined sub-scores
                 refined_total = (
                     refined_skill * (weights["skills"]     / 100)
                     + refined_edu   * (weights["education"]  / 100)
@@ -777,22 +830,51 @@ def _parse_refinement(
 
         # ── Section headers ──────────────────────────────────────────────────
         if lower.startswith("strengths"):
-            current = strengths
+            current_section = "strengths"
             continue
         if lower.startswith("gaps"):
-            current = gaps
+            current_section = "gaps"
             continue
 
-        # ── Bullet items ─────────────────────────────────────────────────────
-        if line.startswith(("*", "-", "•")):
+        # ── Categorised bullet items ─────────────────────────────────────────
+        if line.startswith(("*", "-", "•")) and current_section is not None:
             text = line.lstrip("*-• ").strip()
-            if text and current is not None:
-                current.append(text)
+            if not text:
+                continue
+            # Try to extract category prefix: "Skills: ..." or "Skills - ..."
+            cat_match = re.match(r"^(Skills|Education|Experience|Overall)\s*[:\-]\s*(.*)", text, re.I)
+            if cat_match:
+                cat   = cat_match.group(1).title()   # normalise case
+                value = cat_match.group(2).strip()
+                if current_section == "strengths":
+                    strengths[cat] = value
+                else:
+                    gaps[cat] = value
+            else:
+                # No recognised category prefix — store as Overall if slot free
+                if current_section == "strengths" and "Overall" not in strengths:
+                    strengths["Overall"] = text
+                elif current_section == "gaps" and "Overall" not in gaps:
+                    gaps["Overall"] = text
 
-    if not strengths:
-        strengths = ["Strong alignment with key job requirements"]
-    if not gaps:
-        gaps = ["Some required skills are missing or unverified"]
+    # Fill any missing categories with sensible defaults
+    _default_strengths = {
+        "Skills":     "Matched key technical skills for the role",
+        "Education":  "Educational background meets role requirements",
+        "Experience": "Relevant experience aligned with job needs",
+        "Overall":    "Solid overall alignment with position requirements",
+    }
+    _default_gaps = {
+        "Skills":     "Some required technical skills not verified",
+        "Education":  "Advanced qualification could strengthen candidacy",
+        "Experience": "Additional domain experience may be required",
+        "Overall":    "Minor gaps exist in overall candidate profile",
+    }
+    for cat in ("Skills", "Education", "Experience", "Overall"):
+        if cat not in strengths:
+            strengths[cat] = _default_strengths[cat]
+        if cat not in gaps:
+            gaps[cat] = _default_gaps[cat]
 
     # Blend: 70% base + 30% Claude
     blended_total = round(0.70 * base_total + 0.30 * refined_total, 1)
@@ -860,22 +942,20 @@ def _set_cell_border(cell) -> None:
     tcPr.append(tcBorders)
 
 
-def _score_table(doc: Document, sd: dict, refinement: dict) -> None:
+def _score_table(doc: Document, refinement: dict) -> None:
     """
-    Insert a clean 2-column score table:
+    Compact 2-column score table:
       Metric | Score
       ────────────────
       Skills       XX%
       Education    XX%
       Experience   XX%
-      Final Score  XX%
-    Uses Claude-refined sub-scores; Final Score is the blended total.
+    Uses Claude-refined sub-scores.
     """
     rows_data = [
-        ("Skills",       refinement["refined_skill_score"]),
-        ("Education",    refinement["refined_education_score"]),
-        ("Experience",   refinement["refined_experience_score"]),
-        ("Final Score",  refinement["blended_total"]),
+        ("Skills",      refinement["refined_skill_score"]),
+        ("Education",   refinement["refined_education_score"]),
+        ("Experience",  refinement["refined_experience_score"]),
     ]
 
     table = doc.add_table(rows=1 + len(rows_data), cols=2)
@@ -897,8 +977,7 @@ def _score_table(doc: Document, sd: dict, refinement: dict) -> None:
     # Data rows
     for i, (label, value) in enumerate(rows_data, 1):
         row_cells = table.rows[i].cells
-        is_final  = label == "Final Score"
-        bg_hex    = "EBF3FB" if is_final else ("F9FAFB" if i % 2 == 0 else "FFFFFF")
+        bg_hex = "F9FAFB" if i % 2 == 0 else "FFFFFF"
 
         for cell in row_cells:
             _set_cell_bg(cell, bg_hex)
@@ -908,27 +987,90 @@ def _score_table(doc: Document, sd: dict, refinement: dict) -> None:
         lp = row_cells[0].paragraphs[0]
         lp.clear()
         lr = lp.add_run(label)
-        lr.bold = is_final
         lr.font.size = Pt(10)
 
         # Score cell
         sp = row_cells[1].paragraphs[0]
         sp.clear()
         sr = sp.add_run(f"{value}%")
-        sr.bold = is_final
         sr.font.size = Pt(10)
-        if is_final:
-            sr.font.color.rgb = RGBColor(0x37, 0x86, 0x3C)
         sp.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
 
-def _bullets(doc: Document, items: list[str]) -> None:
-    for item in items:
-        try:
-            doc.add_paragraph(item, style="List Bullet")
-        except Exception:
-            p = doc.add_paragraph()
-            p.add_run(f"  \u2022 {item}")
+def _final_score_block(doc: Document, blended_total: float) -> None:
+    """
+    Bold, larger-font final match score highlight paragraph.
+    """
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(6)
+    p.paragraph_format.space_after  = Pt(6)
+    run = p.add_run(f"FINAL MATCH SCORE:  {blended_total}%")
+    run.bold = True
+    run.font.size = Pt(14)
+    run.font.color.rgb = RGBColor(0x37, 0x86, 0x3C)
+    p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+
+def _insights_table(doc: Document, refinement: dict) -> None:
+    """
+    4-row × 2-column categorised insights table.
+
+    | Strengths                  | Gaps                         |
+    |----------------------------|------------------------------|
+    | Skills: ...                | Skills: ...                  |
+    | Education: ...             | Education: ...               |
+    | Experience: ...            | Experience: ...              |
+    | Overall: ...               | Overall: ...                 |
+    """
+    categories = ("Skills", "Education", "Experience", "Overall")
+    strengths  = refinement["strengths"]
+    gaps       = refinement["gaps"]
+
+    table = doc.add_table(rows=1 + len(categories), cols=2)
+    table.style = "Table Grid"
+
+    # Header row
+    hdr_cells = table.rows[0].cells
+    for cell, label in zip(hdr_cells, ("Strengths", "Gaps")):
+        _set_cell_bg(cell, "1F457C")
+        _set_cell_border(cell)
+        p = cell.paragraphs[0]
+        p.clear()
+        run = p.add_run(label)
+        run.bold = True
+        run.font.size = Pt(10)
+        run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # Category rows
+    for i, cat in enumerate(categories, 1):
+        row_cells = table.rows[i].cells
+        bg_hex = "F9FAFB" if i % 2 == 0 else "FFFFFF"
+
+        for cell in row_cells:
+            _set_cell_bg(cell, bg_hex)
+            _set_cell_border(cell)
+
+        strength_text = f"{cat}: {strengths.get(cat, '—')}"
+        gap_text      = f"{cat}: {gaps.get(cat, '—')}"
+
+        # Strengths cell
+        sp = row_cells[0].paragraphs[0]
+        sp.clear()
+        s_prefix = sp.add_run(f"{cat}: ")
+        s_prefix.bold = True
+        s_prefix.font.size = Pt(9)
+        s_val = sp.add_run(strengths.get(cat, "—"))
+        s_val.font.size = Pt(9)
+
+        # Gaps cell
+        gp = row_cells[1].paragraphs[0]
+        gp.clear()
+        g_prefix = gp.add_run(f"{cat}: ")
+        g_prefix.bold = True
+        g_prefix.font.size = Pt(9)
+        g_val = gp.add_run(gaps.get(cat, "—"))
+        g_val.font.size = Pt(9)
 
 
 def generate_jd_report(
@@ -939,10 +1081,12 @@ def generate_jd_report(
 ) -> bytes:
     """
     Build and return a Word (.docx) report for one JD as raw bytes.
+
     Per candidate:
-      1. HEADER  — file name + extracted candidate name
-      2. SCORE TABLE  — Metric / Score grid (Claude-refined + blended final)
-      3. INSIGHTS  — Strengths & Gaps (Claude-generated)
+      1. HEADER           — candidate name + file name
+      2. SCORE TABLE      — compact Metric / Score grid (Claude-refined sub-scores)
+      3. FINAL SCORE      — bold highlighted blended total
+      4. INSIGHTS TABLE   — categorised Strengths vs Gaps side-by-side
     """
     doc = Document()
     for sec in doc.sections:
@@ -968,7 +1112,7 @@ def generate_jd_report(
         doc.add_paragraph()
 
         for idx, cand in enumerate(candidates, 1):
-            sd   = cand["score_data"]
+            sd             = cand["score_data"]
             file_stem      = cand["name"]
             candidate_name = cand.get("candidate_name", file_stem)
 
@@ -998,23 +1142,24 @@ def generate_jd_report(
                 weights=weights,
             )
 
-            # ── Score table ───────────────────────────────────────────────────
+            # ── Score table (compact — no Final Score row) ────────────────────
             tbl_hdr = doc.add_paragraph()
             tbl_hdr.add_run("Score Breakdown").bold = True
             tbl_hdr.paragraph_format.space_after = Pt(4)
 
-            _score_table(doc, sd, refinement)
+            _score_table(doc, refinement)
             doc.add_paragraph()
 
-            # ── Strengths ─────────────────────────────────────────────────────
-            doc.add_paragraph().add_run("Strengths:").bold = True
-            _bullets(doc, refinement["strengths"])
-
+            # ── Final score highlight ─────────────────────────────────────────
+            _final_score_block(doc, refinement["blended_total"])
             doc.add_paragraph()
 
-            # ── Gaps ──────────────────────────────────────────────────────────
-            doc.add_paragraph().add_run("Gaps:").bold = True
-            _bullets(doc, refinement["gaps"])
+            # ── Insights table (Strengths vs Gaps, categorised) ───────────────
+            ins_hdr = doc.add_paragraph()
+            ins_hdr.add_run("Candidate Insights").bold = True
+            ins_hdr.paragraph_format.space_after = Pt(4)
+
+            _insights_table(doc, refinement)
 
             _hr(doc)
             doc.add_paragraph()
