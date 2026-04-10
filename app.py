@@ -2,7 +2,8 @@
 ATS — Applicant Tracking System
 Rule-based resume screening. Skills matched ONLY from SKILL_LIBRARY.
 No free-form token extraction. No noise. Clean modular design.
-Claude API used ONLY to generate Strengths & Gaps for shortlisted candidates.
+Claude API used ONLY for score refinement + Strengths & Gaps per shortlisted candidate.
+Final Score = 70% base (rule-based) + 30% Claude-refined.
 """
 
 import io
@@ -193,18 +194,14 @@ SKILL_LIBRARY: dict[str, list[str]] = {
 # Pre-computed flat structures derived from SKILL_LIBRARY
 # ---------------------------------------------------------------------------
 
-# Flat set of every valid skill (lowercase)
 _ALL_SKILLS: set[str] = {
     skill.lower().strip()
     for skills in SKILL_LIBRARY.values()
     for skill in skills
 }
 
-# Sorted longest-first so multi-word skills are checked before substrings.
-# e.g. "machine learning" is checked before "learning"
 _SKILLS_BY_LENGTH: list[str] = sorted(_ALL_SKILLS, key=len, reverse=True)
 
-# Pre-compiled word-boundary-aware patterns keyed by skill string
 _SKILL_PATTERNS: dict[str, re.Pattern] = {
     skill: re.compile(
         r"(?<![a-z0-9\-\+\#\.])" + re.escape(skill) + r"(?![a-z0-9\-\+\#\.])",
@@ -216,7 +213,6 @@ _SKILL_PATTERNS: dict[str, re.Pattern] = {
 
 # ===========================================================================
 # EDUCATION MAP
-# Ordered from highest to lowest so the first match wins.
 # ===========================================================================
 
 EDUCATION_DEGREES: list[tuple[list[str], int]] = [
@@ -248,7 +244,6 @@ _EXP_PATTERNS: list[re.Pattern] = [
     re.compile(r"(\d+(?:\.\d+)?)\s*\+?\s*years?\s+exp", re.I),
 ]
 
-# Skills section header keywords
 _SKILLS_HEADERS: set[str] = {
     "skills", "technical skills", "core competencies",
     "technologies", "tech stack", "tools", "expertise",
@@ -256,7 +251,6 @@ _SKILLS_HEADERS: set[str] = {
     "areas of expertise", "tools & technologies",
 }
 
-# Section headers that end a skills block
 _OTHER_SECTIONS: set[str] = {
     "education", "experience", "work experience", "employment history",
     "projects", "certifications", "awards", "publications",
@@ -274,18 +268,17 @@ _OTHER_HDR_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Noise removal: currency symbols, salary patterns, standalone numbers, dates
 _NOISE_RES: list[re.Pattern] = [
     re.compile(r"[\$₹€£¥]\s*[\d,]+(?:\.\d+)?(?:k|l|lpa|lakh)?", re.I),
     re.compile(r"\d[\d,]*\s*(?:k|lpa|lakh|lac|cr|crore)?(?:/month|/year|per month|p\.m\.?|p\.a\.?)", re.I),
-    re.compile(r"(?<![a-zA-Z])\b\d{4}\b"),           # 4-digit years
-    re.compile(r"(?<![a-zA-Z\.])\b\d{1,3}\b(?!\s*[a-zA-Z%])"),  # loose small numbers
+    re.compile(r"(?<![a-zA-Z])\b\d{4}\b"),
+    re.compile(r"(?<![a-zA-Z\.])\b\d{1,3}\b(?!\s*[a-zA-Z%])"),
     re.compile(
         r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[\s,]+\d{4}\b",
         re.I,
     ),
     re.compile(r"stipend|salary|ctc|lpa|per annum|per month", re.I),
-    re.compile(r"[^a-zA-Z0-9\s\.\-\+\#/&]"),         # non-skill characters
+    re.compile(r"[^a-zA-Z0-9\s\.\-\+\#/&]"),
 ]
 
 
@@ -294,10 +287,6 @@ _NOISE_RES: list[re.Pattern] = [
 # ===========================================================================
 
 def clean_text(text: str) -> str:
-    """
-    Remove salary figures, dates, bare numbers, and special characters
-    that would otherwise create false skill matches.
-    """
     for pat in _NOISE_RES:
         text = pat.sub(" ", text)
     return re.sub(r"\s+", " ", text).strip()
@@ -353,15 +342,67 @@ def extract_text(uploaded_file) -> str:
 
 
 # ===========================================================================
+# CANDIDATE NAME EXTRACTION
+# Scans the first 5 lines for a short, capitalized, name-like line.
+# Falls back to the file stem if nothing plausible is found.
+# ===========================================================================
+
+_NAME_NOISE_RE = re.compile(
+    r"\b(?:resume|cv|curriculum vitae|phone|email|address|linkedin|github|"
+    r"www|http|@|mobile|contact|profile|objective|summary)\b",
+    re.I,
+)
+
+
+def extract_candidate_name(raw_text: str, file_stem: str = "") -> str:
+    """
+    Attempt to detect the candidate's name from the top of the resume.
+
+    Strategy:
+    1. Examine the first 5 non-empty lines.
+    2. A probable name line is:
+       - 1–4 words long
+       - Every word starts with a capital letter (title-cased)
+       - Contains no noise keywords (email, phone, LinkedIn, …)
+       - Contains no digits
+    3. Prefer the earliest such line.
+    4. Fallback: clean version of the file stem.
+    """
+    lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
+    candidates = lines[:5]
+
+    for line in candidates:
+        # Strip leading bullet / special chars
+        line = re.sub(r"^[\W_]+", "", line).strip()
+        if not line:
+            continue
+        # Must not contain digits
+        if re.search(r"\d", line):
+            continue
+        # Must not contain noise keywords
+        if _NAME_NOISE_RE.search(line):
+            continue
+        words = line.split()
+        # 1–4 words
+        if not (1 <= len(words) <= 4):
+            continue
+        # Every word title-cased (first char uppercase, rest lowercase or mixed)
+        if all(w[0].isupper() for w in words if w):
+            return " ".join(words)
+
+    # Fallback: humanise the file stem
+    if file_stem:
+        name = re.sub(r"[_\-]+", " ", file_stem).strip()
+        return name.title()
+
+    return "Unknown Candidate"
+
+
+# ===========================================================================
 # SKILL EXTRACTION  (library-only, no free-form tokens)
 # ===========================================================================
 
 def find_skills_in_text(text: str) -> set[str]:
-    """
-    Return the subset of SKILL_LIBRARY entries found in `text`.
-    Checks longest phrases first to prevent partial matches.
-    ONLY skills in _ALL_SKILLS can ever be returned.
-    """
     tl = text.lower()
     found: set[str] = set()
     for skill in _SKILLS_BY_LENGTH:
@@ -371,10 +412,6 @@ def find_skills_in_text(text: str) -> set[str]:
 
 
 def _skills_section_bounds(lines: list[str]) -> tuple[int, int]:
-    """
-    Find the line range [start, end) of the skills section.
-    Returns (-1, -1) if no skills section detected.
-    """
     start = -1
     for i, line in enumerate(lines):
         if _SKILLS_HDR_RE.match(line.strip()):
@@ -393,14 +430,6 @@ def _skills_section_bounds(lines: list[str]) -> tuple[int, int]:
 
 
 def extract_skills_weighted(raw_text: str, target_skills: set[str]) -> dict[str, float]:
-    """
-    For each skill in `target_skills`, search the resume and assign weight:
-      - Found in dedicated skills section → 1.0
-      - Found elsewhere in the document   → 0.6
-      - Not found                         → excluded from result
-
-    Returns {skill: weight}.
-    """
     lines = raw_text.split("\n")
     s, e = _skills_section_bounds(lines)
 
@@ -434,7 +463,6 @@ def extract_jd_features(raw_text: str) -> dict:
 
 
 def _max_years(text: str) -> float:
-    """Return the largest years-of-experience figure found in text."""
     tl = text.lower()
     hits: list[float] = []
     for pat in _EXP_PATTERNS:
@@ -450,22 +478,23 @@ def _max_years(text: str) -> float:
 # RESUME PARSING
 # ===========================================================================
 
-def parse_resume(raw_text: str) -> dict:
+def parse_resume(raw_text: str, file_stem: str = "") -> dict:
     """
     Parse a resume into structured fields.
-    Returns: cleaned_text, raw_text, skills (set), experience_years (float).
+    Returns: cleaned_text, raw_text, candidate_name, skills, experience_years.
     """
     cleaned = clean_text(raw_text)
     return {
         "raw_text": raw_text,
         "cleaned_text": cleaned,
+        "candidate_name": extract_candidate_name(raw_text, file_stem),
         "skills": find_skills_in_text(cleaned),
         "experience_years": _max_years(raw_text),
     }
 
 
 # ===========================================================================
-# SCORING
+# SCORING  (base rule-based — unchanged)
 # ===========================================================================
 
 def compute_skill_score(
@@ -490,14 +519,9 @@ def compute_skill_score(
 
 
 def compute_education_score(raw_text: str) -> float:
-    """
-    Scan text for education keywords (highest-level first).
-    Return mapped score (0–100); first match wins.
-    """
     tl = raw_text.lower()
     for keywords, pts in EDUCATION_DEGREES:
         for kw in keywords:
-            # whole-word match to avoid "master" matching "mastercard"
             pat = r"(?<![a-z])" + re.escape(kw) + r"(?![a-z])"
             if re.search(pat, tl):
                 return float(pts)
@@ -505,11 +529,6 @@ def compute_education_score(raw_text: str) -> float:
 
 
 def compute_experience_score(resume_years: float, required_years: float) -> float:
-    """
-    resume_years >= required_years → 100
-    resume_years < required_years  → proportional (resume / required × 100)
-    required_years == 0            → 100 (no requirement specified)
-    """
     if required_years <= 0:
         return 100.0
     if resume_years >= required_years:
@@ -521,8 +540,9 @@ def score_resume_against_jd(
     resume: dict, jd_features: dict, weights: dict
 ) -> dict:
     """
-    Composite weighted score for a single (resume, JD) pair.
-    All sub-scores are on a 0–100 scale.
+    Composite weighted base score for a single (resume, JD) pair.
+    Returns raw base scores + matched/missing skill lists.
+    Claude refinement is applied separately to keep this function pure.
     """
     skill_score, matched, missing = compute_skill_score(
         resume["raw_text"], jd_features["skills"]
@@ -566,9 +586,9 @@ def cluster_resumes_to_jds(
        Each resume is assigned exactly once.
        Each JD accepts at most `top_n` candidates.
 
-    Returns {jd_name: [{"name": str, "score_data": dict}, ...]} sorted desc.
+    Returns {jd_name: [{"name": str, "candidate_name": str, "score_data": dict}, ...]}
+    sorted desc.
     """
-    # Build full score matrix
     matrix: list[tuple[int, int, float, dict]] = []
     for r_idx, resume in enumerate(resumes):
         for j_idx, jd in enumerate(jd_list):
@@ -587,92 +607,185 @@ def cluster_resumes_to_jds(
         jd_name = jd_list[j_idx]["name"]
         if slots[jd_name] >= top_n:
             continue
-        result[jd_name].append({"name": resumes[r_idx]["name"], "score_data": sd})
+        result[jd_name].append({
+            "name":           resumes[r_idx]["name"],
+            "candidate_name": resumes[r_idx].get("candidate_name", resumes[r_idx]["name"]),
+            "score_data":     sd,
+        })
         assigned.add(r_idx)
         slots[jd_name] += 1
         if len(assigned) == len(resumes):
             break
 
-    # Sort each bucket descending
     for name in result:
         result[name].sort(key=lambda x: x["score_data"]["total"], reverse=True)
 
     return dict(result)
 
 
-
 # ===========================================================================
-# CLAUDE API — INSIGHTS GENERATION
-# Sends ONLY skill lists (no resume/JD text). Token-optimized.
+# CLAUDE API — SCORE REFINEMENT + INSIGHTS
+# Sends ONLY structured skill data (no resume / JD text). Token-optimised.
+# One API call per shortlisted candidate; result contains refined scores
+# AND strengths / gaps simultaneously.
 # ===========================================================================
 
-def generate_insights(
+_REFINE_PROMPT_TEMPLATE = """\
+You are an expert recruiter.
+Evaluate candidate alignment using structured data.
+
+Job Skills: {jd_skills}
+Matched Skills: {matched_skills}
+Missing Skills: {missing_skills}
+
+Base Scores: Skills: {skill_score} Education: {education_score} Experience: {experience_score}
+
+Instructions:
+* Adjust scores slightly based on relevance
+* Penalize missing critical skills
+* Consider relevance, not just presence
+* Keep scores between 0–100
+* Do not drastically change base scores
+
+Also generate:
+* 2–3 Strengths
+* 2–3 Gaps
+
+Rules:
+* Each point under 12 words
+* Specific and job-relevant
+* No generic statements
+
+Output format (use exactly):
+Refined Scores: Skills: XX Education: XX Experience: XX Final: XX
+Strengths:
+* ...
+* ...
+Gaps:
+* ...
+* ...\
+"""
+
+
+def refine_scores_with_claude(
     jd_skills: list[str],
     matched_skills: list[str],
     missing_skills: list[str],
-) -> tuple[list[str], list[str]]:
+    base_skill_score: float,
+    base_education_score: float,
+    base_experience_score: float,
+    base_total: float,
+    weights: dict,
+) -> dict:
     """
-    Call Claude to convert structured skill data into Strengths and Gaps.
-    Returns (strengths: list[str], gaps: list[str]).
-    Falls back to simple defaults if the API call fails.
-    """
-    jd_skills_trimmed      = jd_skills[:20]
-    matched_skills_trimmed = matched_skills[:15]
-    missing_skills_trimmed = missing_skills[:15]
+    Send compact structured data to Claude. Returns:
+      refined_skill_score, refined_education_score, refined_experience_score,
+      refined_total, blended_total, strengths, gaps.
 
-    prompt = (
-        "You are an expert recruiter.\n"
-        "Convert structured skill data into hiring insights.\n\n"
-        f"Job Skills: {jd_skills_trimmed}\n"
-        f"Matched Skills: {matched_skills_trimmed}\n"
-        f"Missing Skills: {missing_skills_trimmed}\n\n"
-        "Generate:\n"
-        "Strengths (2\u20133 bullet points)\n"
-        "Gaps (2\u20133 bullet points)\n\n"
-        "Rules:\n"
-        "* Keep each point under 12 words\n"
-        "* Be specific and concise\n"
-        "* Focus only on relevant job alignment\n"
-        "* Do not repeat input directly\n"
-        "* Do not add assumptions\n\n"
-        "Output format:\n"
-        "Strengths:\n* ...\n* ...\nGaps:\n* ...\n* ..."
+    Blend formula: blended_total = 0.70 × base_total + 0.30 × claude_total
+
+    Falls back gracefully on any API error.
+    """
+    fallback = _build_fallback(
+        base_skill_score, base_education_score, base_experience_score, base_total
+    )
+
+    prompt = _REFINE_PROMPT_TEMPLATE.format(
+        jd_skills=jd_skills[:20],
+        matched_skills=matched_skills[:15],
+        missing_skills=missing_skills[:15],
+        skill_score=round(base_skill_score),
+        education_score=round(base_education_score),
+        experience_score=round(base_experience_score),
     )
 
     try:
         client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
         message = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=200,
+            max_tokens=250,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = message.content[0].text.strip()
-        return _parse_insights(raw)
+        return _parse_refinement(
+            raw, base_skill_score, base_education_score,
+            base_experience_score, base_total, weights,
+        )
     except Exception:
-        strengths = ["Strong alignment with key job requirements"]
-        gaps = ["Some required skills are missing or unverified"]
-        return strengths, gaps
+        return fallback
 
 
-def _parse_insights(raw: str) -> tuple[list[str], list[str]]:
-    """Parse Claude's plain-text output into two bullet lists."""
+def _build_fallback(
+    skill: float, edu: float, exp: float, total: float
+) -> dict:
+    return {
+        "refined_skill_score":      skill,
+        "refined_education_score":  edu,
+        "refined_experience_score": exp,
+        "refined_total":            total,
+        "blended_total":            total,
+        "strengths": ["Strong alignment with key job requirements"],
+        "gaps":       ["Some required skills are missing or unverified"],
+    }
+
+
+def _parse_refinement(
+    raw: str,
+    base_skill: float,
+    base_edu: float,
+    base_exp: float,
+    base_total: float,
+    weights: dict,
+) -> dict:
+    """
+    Parse Claude's plain-text output into refined scores + insights.
+    Falls back to base values on any parse failure.
+    """
+    refined_skill = base_skill
+    refined_edu   = base_edu
+    refined_exp   = base_exp
+    refined_total = base_total
     strengths: list[str] = []
-    gaps: list[str] = []
-    current: list[str] | None = None
+    gaps:      list[str] = []
+    current:   list[str] | None = None
 
     for line in raw.splitlines():
         line = line.strip()
         if not line:
             continue
         lower = line.lower()
+
+        # ── Refined scores line ──────────────────────────────────────────────
+        if lower.startswith("refined scores"):
+            nums = re.findall(r"(\d+(?:\.\d+)?)", line)
+            if len(nums) >= 4:
+                refined_skill = _clamp(float(nums[0]))
+                refined_edu   = _clamp(float(nums[1]))
+                refined_exp   = _clamp(float(nums[2]))
+                refined_total = _clamp(float(nums[3]))
+            elif len(nums) == 3:
+                refined_skill = _clamp(float(nums[0]))
+                refined_edu   = _clamp(float(nums[1]))
+                refined_exp   = _clamp(float(nums[2]))
+                # Recompute total from refined sub-scores
+                refined_total = (
+                    refined_skill * (weights["skills"]     / 100)
+                    + refined_edu   * (weights["education"]  / 100)
+                    + refined_exp   * (weights["experience"] / 100)
+                )
+            continue
+
+        # ── Section headers ──────────────────────────────────────────────────
         if lower.startswith("strengths"):
             current = strengths
             continue
         if lower.startswith("gaps"):
             current = gaps
             continue
-        if line.startswith("*") or line.startswith("-") or line.startswith("\u2022"):
-            text = line.lstrip("*-\u2022 ").strip()
+
+        # ── Bullet items ─────────────────────────────────────────────────────
+        if line.startswith(("*", "-", "•")):
+            text = line.lstrip("*-• ").strip()
             if text and current is not None:
                 current.append(text)
 
@@ -681,7 +794,22 @@ def _parse_insights(raw: str) -> tuple[list[str], list[str]]:
     if not gaps:
         gaps = ["Some required skills are missing or unverified"]
 
-    return strengths, gaps
+    # Blend: 70% base + 30% Claude
+    blended_total = round(0.70 * base_total + 0.30 * refined_total, 1)
+
+    return {
+        "refined_skill_score":      round(refined_skill, 1),
+        "refined_education_score":  round(refined_edu, 1),
+        "refined_experience_score": round(refined_exp, 1),
+        "refined_total":            round(refined_total, 1),
+        "blended_total":            blended_total,
+        "strengths":                strengths,
+        "gaps":                     gaps,
+    }
+
+
+def _clamp(v: float, lo: float = 0.0, hi: float = 100.0) -> float:
+    return max(lo, min(hi, v))
 
 
 # ===========================================================================
@@ -706,11 +834,92 @@ def _hr(doc: Document) -> None:
     pPr.append(pBdr)
 
 
-def _label_value(doc: Document, label: str, value: str) -> None:
-    p = doc.add_paragraph()
-    p.add_run(f"{label}: ").bold = True
-    p.add_run(value)
-    p.paragraph_format.space_after = Pt(2)
+def _set_cell_bg(cell, hex_color: str) -> None:
+    """Apply a solid background colour to a table cell."""
+    tc   = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+    shd  = OxmlElement("w:shd")
+    shd.set(qn("w:val"),   "clear")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:fill"),  hex_color)
+    tcPr.append(shd)
+
+
+def _set_cell_border(cell) -> None:
+    """Thin border on all four sides of a cell."""
+    tc   = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+    tcBorders = OxmlElement("w:tcBorders")
+    for side in ("top", "left", "bottom", "right"):
+        el = OxmlElement(f"w:{side}")
+        el.set(qn("w:val"),   "single")
+        el.set(qn("w:sz"),    "4")
+        el.set(qn("w:space"), "0")
+        el.set(qn("w:color"), "CCCCCC")
+        tcBorders.append(el)
+    tcPr.append(tcBorders)
+
+
+def _score_table(doc: Document, sd: dict, refinement: dict) -> None:
+    """
+    Insert a clean 2-column score table:
+      Metric | Score
+      ────────────────
+      Skills       XX%
+      Education    XX%
+      Experience   XX%
+      Final Score  XX%
+    Uses Claude-refined sub-scores; Final Score is the blended total.
+    """
+    rows_data = [
+        ("Skills",       refinement["refined_skill_score"]),
+        ("Education",    refinement["refined_education_score"]),
+        ("Experience",   refinement["refined_experience_score"]),
+        ("Final Score",  refinement["blended_total"]),
+    ]
+
+    table = doc.add_table(rows=1 + len(rows_data), cols=2)
+    table.style = "Table Grid"
+
+    # Header row
+    hdr_cells = table.rows[0].cells
+    for cell, text in zip(hdr_cells, ("Metric", "Score")):
+        _set_cell_bg(cell, "1F457C")
+        _set_cell_border(cell)
+        p = cell.paragraphs[0]
+        p.clear()
+        run = p.add_run(text)
+        run.bold = True
+        run.font.size = Pt(10)
+        run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # Data rows
+    for i, (label, value) in enumerate(rows_data, 1):
+        row_cells = table.rows[i].cells
+        is_final  = label == "Final Score"
+        bg_hex    = "EBF3FB" if is_final else ("F9FAFB" if i % 2 == 0 else "FFFFFF")
+
+        for cell in row_cells:
+            _set_cell_bg(cell, bg_hex)
+            _set_cell_border(cell)
+
+        # Label cell
+        lp = row_cells[0].paragraphs[0]
+        lp.clear()
+        lr = lp.add_run(label)
+        lr.bold = is_final
+        lr.font.size = Pt(10)
+
+        # Score cell
+        sp = row_cells[1].paragraphs[0]
+        sp.clear()
+        sr = sp.add_run(f"{value}%")
+        sr.bold = is_final
+        sr.font.size = Pt(10)
+        if is_final:
+            sr.font.color.rgb = RGBColor(0x37, 0x86, 0x3C)
+        sp.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
 
 def _bullets(doc: Document, items: list[str]) -> None:
@@ -722,18 +931,27 @@ def _bullets(doc: Document, items: list[str]) -> None:
             p.add_run(f"  \u2022 {item}")
 
 
-def generate_jd_report(jd_name: str, jd_skills: list[str], candidates: list[dict]) -> bytes:
-    """Build and return a Word (.docx) report for one JD as raw bytes.
-    Strengths & Gaps are generated via Claude for each shortlisted candidate.
+def generate_jd_report(
+    jd_name: str,
+    jd_skills: list[str],
+    candidates: list[dict],
+    weights: dict,
+) -> bytes:
+    """
+    Build and return a Word (.docx) report for one JD as raw bytes.
+    Per candidate:
+      1. HEADER  — file name + extracted candidate name
+      2. SCORE TABLE  — Metric / Score grid (Claude-refined + blended final)
+      3. INSIGHTS  — Strengths & Gaps (Claude-generated)
     """
     doc = Document()
     for sec in doc.sections:
-        sec.top_margin = Inches(1)
+        sec.top_margin    = Inches(1)
         sec.bottom_margin = Inches(1)
-        sec.left_margin = Inches(1.2)
-        sec.right_margin = Inches(1.2)
+        sec.left_margin   = Inches(1.2)
+        sec.right_margin  = Inches(1.2)
 
-    # Title
+    # ── Report title ──────────────────────────────────────────────────────────
     title = doc.add_heading(f"Hiring Report \u2014 {jd_name}", level=0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     if title.runs:
@@ -750,38 +968,53 @@ def generate_jd_report(jd_name: str, jd_skills: list[str], candidates: list[dict
         doc.add_paragraph()
 
         for idx, cand in enumerate(candidates, 1):
-            sd = cand["score_data"]
+            sd   = cand["score_data"]
+            file_stem      = cand["name"]
+            candidate_name = cand.get("candidate_name", file_stem)
 
-            h = doc.add_heading(f"{idx}. {cand['name']}", level=2)
+            # ── Candidate heading ─────────────────────────────────────────────
+            h = doc.add_heading(f"{idx}. {candidate_name}", level=2)
             if h.runs:
                 _rgb(h.runs[0], 0x2E, 0x74, 0xB5)
 
-            sp = doc.add_paragraph()
-            sr = sp.add_run(f"Match Score: {sd['total']}%")
-            sr.bold = True
-            sr.font.size = Pt(13)
-            _rgb(sr, 0x37, 0x86, 0x3C)
+            # File name sub-label
+            fn_p = doc.add_paragraph()
+            fn_r = fn_p.add_run(f"File: {file_stem}")
+            fn_r.font.size = Pt(9)
+            fn_r.font.color.rgb = RGBColor(0x6B, 0x72, 0x80)
+            fn_p.paragraph_format.space_after = Pt(4)
 
-            doc.add_paragraph().add_run("Score Breakdown:").bold = True
-            _label_value(doc, "  Skills",     f"{sd['skill_score']}%")
-            _label_value(doc, "  Education",  f"{sd['education_score']}%")
-            _label_value(doc, "  Experience", f"{sd['experience_score']}%")
             doc.add_paragraph()
 
-            # ── Claude-generated Strengths & Gaps ──────────────────────────────────────
-            strengths, gaps = generate_insights(
+            # ── Claude refinement (one API call per candidate) ─────────────────
+            refinement = refine_scores_with_claude(
                 jd_skills=jd_skills,
                 matched_skills=sd["matched_skills"],
                 missing_skills=sd["missing_skills"],
+                base_skill_score=sd["skill_score"],
+                base_education_score=sd["education_score"],
+                base_experience_score=sd["experience_score"],
+                base_total=sd["total"],
+                weights=weights,
             )
 
+            # ── Score table ───────────────────────────────────────────────────
+            tbl_hdr = doc.add_paragraph()
+            tbl_hdr.add_run("Score Breakdown").bold = True
+            tbl_hdr.paragraph_format.space_after = Pt(4)
+
+            _score_table(doc, sd, refinement)
+            doc.add_paragraph()
+
+            # ── Strengths ─────────────────────────────────────────────────────
             doc.add_paragraph().add_run("Strengths:").bold = True
-            _bullets(doc, strengths)
+            _bullets(doc, refinement["strengths"])
 
             doc.add_paragraph()
+
+            # ── Gaps ──────────────────────────────────────────────────────────
             doc.add_paragraph().add_run("Gaps:").bold = True
-            _bullets(doc, gaps)
-            # ──────────────────────────────────────────────────────────────────────────────
+            _bullets(doc, refinement["gaps"])
 
             _hr(doc)
             doc.add_paragraph()
@@ -803,9 +1036,6 @@ def main() -> None:
         layout="centered",
     )
 
-    # ------------------------------------------------------------------
-    # Minimal safe CSS — dark Notion-style polish on top of config.toml
-    # ------------------------------------------------------------------
     st.markdown(
         """
         <style>
@@ -901,7 +1131,6 @@ def main() -> None:
         st.markdown("## ⚙️ Configuration")
         st.markdown("<div class='gap-sm'></div>", unsafe_allow_html=True)
 
-        # — Section 1: Selection —
         st.markdown(
             "<div class='sb-card'><div class='sb-label'>Top Candidates</div>",
             unsafe_allow_html=True,
@@ -909,7 +1138,6 @@ def main() -> None:
         top_n = st.slider("Per JD", min_value=1, max_value=20, value=5)
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # — Section 2: Scoring Weights —
         st.markdown(
             "<div class='sb-card'><div class='sb-label'>Scoring Weights (%)</div>",
             unsafe_allow_html=True,
@@ -938,7 +1166,6 @@ def main() -> None:
 
     st.markdown("<div class='gap-md'></div>", unsafe_allow_html=True)
 
-    # — Upload section —
     col_jd, col_res = st.columns(2, gap="medium")
 
     with col_jd:
@@ -983,7 +1210,6 @@ def main() -> None:
 
     st.markdown("<div class='gap-md'></div>", unsafe_allow_html=True)
 
-    # — Generate button —
     if st.button("📄 Generate Reports", type="primary", use_container_width=True):
         errors = []
         if not jd_files:
@@ -1007,7 +1233,7 @@ def main() -> None:
                     st.warning(f"⚠️ Could not read: {f.name}")
                     continue
                 jd_list.append({
-                    "name": f.name.rsplit(".", 1)[0],
+                    "name":     f.name.rsplit(".", 1)[0],
                     "features": extract_jd_features(raw),
                 })
 
@@ -1022,8 +1248,9 @@ def main() -> None:
                 if not raw.strip():
                     st.warning(f"⚠️ Could not read: {f.name}")
                     continue
-                parsed = parse_resume(raw)
-                resume_list.append({"name": f.name.rsplit(".", 1)[0], **parsed})
+                file_stem = f.name.rsplit(".", 1)[0]
+                parsed = parse_resume(raw, file_stem)
+                resume_list.append({"name": file_stem, **parsed})
 
         if not resume_list:
             st.error("No valid resumes parsed.")
@@ -1032,7 +1259,6 @@ def main() -> None:
         with st.spinner("Scoring and assigning candidates…"):
             assignments = cluster_resumes_to_jds(resume_list, jd_list, weights, top_n)
 
-        # — Results Summary —
         st.markdown("<div class='gap-md'></div>", unsafe_allow_html=True)
         st.markdown("### Results Summary")
 
@@ -1043,7 +1269,6 @@ def main() -> None:
             else:
                 st.warning(f"**{jd['name']}** → No suitable candidates found")
 
-        # — Downloads —
         any_dl = any(assignments.get(jd["name"]) for jd in jd_list)
         if any_dl:
             st.markdown("<div class='gap-md'></div>", unsafe_allow_html=True)
@@ -1054,7 +1279,9 @@ def main() -> None:
                     continue
                 jd_skills = sorted(jd["features"]["skills"])
                 with st.spinner(f"Generating insights for {jd['name']}\u2026"):
-                    report = generate_jd_report(jd["name"], jd_skills, candidates)
+                    report = generate_jd_report(
+                        jd["name"], jd_skills, candidates, weights
+                    )
                 safe = re.sub(r"[^\w\-_]", "_", jd["name"])
                 st.download_button(
                     label=f"⬇ Download — {jd['name']}",
