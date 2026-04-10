@@ -1,11 +1,11 @@
 """
-ATS - Applicant Tracking System
-Production-ready, rule-based resume screening with Word report generation.
+ATS — Applicant Tracking System
+Rule-based resume screening. Skills matched ONLY from SKILL_LIBRARY.
+No free-form token extraction. No noise. Clean modular design.
 """
 
 import io
 import re
-import zipfile
 from collections import defaultdict
 
 import streamlit as st
@@ -17,75 +17,317 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
+
+# ===========================================================================
+# SKILL LIBRARY
+# Single source of truth. Only these exact strings will ever match.
+# Add domain-specific skills here to extend coverage.
+# ===========================================================================
+
+SKILL_LIBRARY: dict[str, list[str]] = {
+    "programming": [
+        "python", "r", "java", "javascript", "typescript", "c", "c++", "c#",
+        "golang", "go", "rust", "scala", "kotlin", "swift", "php", "ruby",
+        "perl", "matlab", "bash", "shell", "powershell", "vba", "sas", "stata",
+        "julia", "cobol", "assembly",
+    ],
+    "web": [
+        "html", "css", "react", "react.js", "angular", "vue", "vue.js",
+        "next.js", "node.js", "express", "django", "flask", "fastapi",
+        "spring", "asp.net", "laravel", "rails", "graphql", "rest api",
+        "restful api", "soap", "webpack", "tailwind", "bootstrap", "jquery",
+        "redux", "svelte",
+    ],
+    "data": [
+        "sql", "mysql", "postgresql", "sqlite", "oracle", "ms sql", "sql server",
+        "nosql", "mongodb", "cassandra", "redis", "elasticsearch",
+        "excel", "google sheets", "pivot tables", "vlookup", "power query",
+        "tableau", "power bi", "looker", "qlikview", "qliksense", "metabase",
+        "data analysis", "data analytics", "analytics", "data visualization",
+        "data wrangling", "data cleaning", "etl", "data pipeline",
+        "data engineering", "data modeling", "data warehousing",
+        "big data", "hadoop", "spark", "kafka", "airflow", "dbt",
+        "snowflake", "redshift", "bigquery", "databricks", "hive",
+        "pandas", "numpy", "matplotlib", "seaborn", "plotly",
+        "statistics", "statistical analysis", "hypothesis testing",
+        "regression", "time series", "forecasting", "a/b testing",
+    ],
+    "ml_ai": [
+        "machine learning", "deep learning", "neural networks",
+        "natural language processing", "nlp", "computer vision",
+        "reinforcement learning", "supervised learning", "unsupervised learning",
+        "classification", "clustering", "recommendation systems",
+        "feature engineering", "model deployment", "mlops",
+        "scikit-learn", "sklearn", "tensorflow", "keras", "pytorch",
+        "xgboost", "lightgbm", "catboost", "hugging face", "transformers",
+        "bert", "gpt", "llm", "generative ai", "langchain", "rag",
+        "opencv", "yolo", "object detection",
+    ],
+    "cloud_devops": [
+        "aws", "azure", "gcp", "google cloud", "cloud computing",
+        "docker", "kubernetes", "terraform", "ansible", "chef", "puppet",
+        "ci/cd", "jenkins", "github actions", "gitlab ci", "circleci",
+        "linux", "unix", "nginx", "apache", "microservices",
+        "serverless", "lambda", "azure functions", "devops",
+        "infrastructure as code", "prometheus", "grafana",
+    ],
+    "databases": [
+        "database design", "database administration", "dba",
+        "stored procedures", "indexing", "query optimization",
+        "data migration",
+    ],
+    "finance": [
+        "finance", "financial analysis", "financial modeling", "financial reporting",
+        "accounting", "bookkeeping", "accounts payable", "accounts receivable",
+        "general ledger", "reconciliation",
+        "budgeting", "variance analysis", "cost analysis",
+        "valuation", "dcf", "discounted cash flow", "equity research",
+        "investment banking", "private equity", "venture capital",
+        "portfolio management", "risk management", "credit analysis",
+        "audit", "taxation", "tax", "gst", "tds",
+        "ifrs", "gaap", "us gaap", "ind as",
+        "tally", "quickbooks", "sap fico", "oracle financials",
+        "ms dynamics", "xero", "zoho books",
+        "balance sheet", "income statement", "cash flow statement",
+        "working capital", "capex", "ebitda", "irr", "npv",
+        "mergers and acquisitions", "m&a",
+    ],
+    "marketing": [
+        "marketing", "digital marketing", "performance marketing",
+        "seo", "sem", "search engine optimization", "search engine marketing",
+        "google ads", "google adwords", "facebook ads", "meta ads",
+        "instagram ads", "linkedin ads", "programmatic advertising",
+        "content marketing", "content strategy", "content creation",
+        "social media marketing", "social media management",
+        "email marketing", "marketing automation", "crm",
+        "hubspot", "salesforce", "marketo", "mailchimp", "klaviyo",
+        "branding", "brand management", "brand strategy",
+        "market research", "consumer insights", "competitive analysis",
+        "product marketing", "go to market", "gtm strategy",
+        "growth hacking", "growth marketing", "retention marketing",
+        "affiliate marketing", "influencer marketing",
+        "ahrefs", "semrush", "moz", "google analytics",
+        "google tag manager", "mixpanel", "amplitude", "clevertap",
+        "conversion rate optimization", "cro",
+        "copywriting", "ad copywriting",
+    ],
+    "sales": [
+        "sales", "b2b sales", "b2c sales", "inside sales", "field sales",
+        "business development", "lead generation", "prospecting",
+        "cold calling", "cold emailing", "outbound sales",
+        "account management", "key account management", "kam",
+        "client relationship management", "customer success",
+        "revenue generation", "deal closing", "negotiation",
+        "pipeline management", "crm management",
+        "salesforce crm", "zoho crm", "hubspot crm",
+    ],
+    "product_project": [
+        "product management", "product roadmap", "product strategy",
+        "agile", "scrum", "kanban", "sprint planning", "backlog grooming",
+        "jira", "confluence", "trello", "asana", "notion",
+        "project management", "pmp", "prince2",
+        "stakeholder management", "requirement gathering",
+        "user stories", "mvp", "product launch",
+        "ux", "ui", "user experience", "user interface",
+        "wireframing", "prototyping", "figma", "sketch", "zeplin",
+        "usability testing", "user research",
+    ],
+    "hr": [
+        "human resources", "talent acquisition", "recruitment",
+        "sourcing", "talent management", "performance management",
+        "learning and development", "training",
+        "compensation and benefits", "payroll", "hris",
+        "employee engagement", "employee relations",
+        "organizational development", "change management",
+        "hr analytics", "workforce planning",
+        "workday", "successfactors", "bamboohr", "darwinbox",
+        "linkedin recruiter",
+    ],
+    "operations": [
+        "operations management", "supply chain", "supply chain management",
+        "procurement", "vendor management",
+        "inventory management", "warehouse management",
+        "logistics", "last mile delivery", "fulfillment",
+        "lean", "six sigma", "kaizen", "process improvement",
+        "quality assurance", "quality control",
+        "erp", "sap", "oracle erp",
+    ],
+    "soft_skills": [
+        "communication", "written communication", "verbal communication",
+        "presentation", "public speaking", "leadership", "team leadership",
+        "problem solving", "critical thinking", "decision making",
+        "time management", "project coordination",
+        "client communication", "stakeholder communication",
+    ],
+    "research": [
+        "research", "literature review", "research methodology",
+        "quantitative research", "qualitative research",
+        "survey design", "data collection", "report writing",
+        "academic writing", "peer review",
+    ],
+    "legal": [
+        "legal research", "contract drafting", "contract review",
+        "compliance", "regulatory compliance", "gdpr", "data privacy",
+        "intellectual property", "corporate law", "litigation",
+    ],
+    "healthcare": [
+        "clinical research", "clinical trials", "pharmacovigilance",
+        "medical writing", "regulatory affairs", "gcp", "gmp",
+        "healthcare management", "hospital management", "ehr", "emr",
+    ],
+    "design": [
+        "graphic design", "visual design", "ui design", "ux design",
+        "adobe photoshop", "photoshop", "illustrator", "adobe illustrator",
+        "indesign", "after effects", "premiere pro",
+        "canva", "figma", "sketch", "invision",
+        "video editing", "motion graphics", "3d modeling",
+        "autocad", "solidworks", "catia",
+    ],
+}
+
 # ---------------------------------------------------------------------------
-# Constants
+# Pre-computed flat structures derived from SKILL_LIBRARY
 # ---------------------------------------------------------------------------
 
-SKILLS_SECTION_KEYWORDS = {
-    "skills", "technical skills", "core competencies",
-    "technologies", "tech stack", "tools", "expertise",
-    "competencies", "proficiencies"
+# Flat set of every valid skill (lowercase)
+_ALL_SKILLS: set[str] = {
+    skill.lower().strip()
+    for skills in SKILL_LIBRARY.values()
+    for skill in skills
 }
 
-EDUCATION_KEYWORDS = {
-    "b.tech", "b.e", "be ", "btech", "bachelor", "b.sc", "bsc",
-    "m.tech", "mtech", "m.e", "me ", "master", "mba", "m.sc", "msc",
-    "phd", "ph.d", "doctorate", "diploma", "associate",
-    "10th", "12th", "ssc", "hsc", "intermediate", "matric",
-    "computer science", "information technology", "engineering",
-    "mathematics", "statistics", "data science", "machine learning",
+# Sorted longest-first so multi-word skills are checked before substrings.
+# e.g. "machine learning" is checked before "learning"
+_SKILLS_BY_LENGTH: list[str] = sorted(_ALL_SKILLS, key=len, reverse=True)
+
+# Pre-compiled word-boundary-aware patterns keyed by skill string
+_SKILL_PATTERNS: dict[str, re.Pattern] = {
+    skill: re.compile(
+        r"(?<![a-z0-9\-\+\#\.])" + re.escape(skill) + r"(?![a-z0-9\-\+\#\.])",
+        re.IGNORECASE,
+    )
+    for skill in _SKILLS_BY_LENGTH
 }
 
-EDUCATION_SCORE_MAP = {
-    "phd": 100, "ph.d": 100, "doctorate": 100,
-    "m.tech": 90, "mtech": 90, "m.e": 90, "master": 90,
-    "mba": 85, "m.sc": 85, "msc": 85,
-    "b.tech": 75, "btech": 75, "b.e": 75, "be ": 75, "bachelor": 75,
-    "b.sc": 70, "bsc": 70,
-    "diploma": 55, "associate": 55,
-    "12th": 40, "hsc": 40, "intermediate": 40,
-    "10th": 25, "ssc": 25, "matric": 25,
-}
 
-EXPERIENCE_PATTERNS = [
-    r"(\d+(?:\.\d+)?)\s*\+?\s*years?\s+(?:of\s+)?(?:experience|exp)",
-    r"experience\s+(?:of\s+)?(\d+(?:\.\d+)?)\s*\+?\s*years?",
-    r"(\d+(?:\.\d+)?)\s*\+?\s*yrs?\s+(?:of\s+)?(?:experience|exp)",
-    r"(\d+(?:\.\d+)?)\s*\+?\s*years?",
+# ===========================================================================
+# EDUCATION MAP
+# Ordered from highest to lowest so the first match wins.
+# ===========================================================================
+
+EDUCATION_DEGREES: list[tuple[list[str], int]] = [
+    (["phd", "ph.d", "doctorate", "doctor of philosophy"], 100),
+    (["m.tech", "mtech", "master of technology", "master of engineering"], 90),
+    (["mba", "master of business administration", "masters in business"], 88),
+    (["master", "masters", "m.s.", "m.sc", "msc", "master of science",
+      "master of arts", "m.a."], 85),
+    (["b.tech", "btech", "b.e.", "bachelor of technology",
+      "bachelor of engineering"], 75),
+    (["bachelor", "bachelors", "b.sc", "bsc", "bachelor of science",
+      "b.com", "bcom", "bachelor of commerce", "b.a.", "bba",
+      "bachelor of arts", "bachelor of business"], 70),
+    (["diploma", "associate degree", "associate"], 50),
+    (["12th", "hsc", "higher secondary", "intermediate", "senior secondary"], 35),
+    (["10th", "ssc", "secondary school", "matric"], 20),
 ]
 
-# ---------------------------------------------------------------------------
-# Text Extraction
-# ---------------------------------------------------------------------------
 
-def extract_text_from_pdf(file_bytes: bytes) -> str:
-    """Extract raw text from a PDF file."""
+# ===========================================================================
+# EXPERIENCE EXTRACTION
+# ===========================================================================
+
+_EXP_PATTERNS: list[re.Pattern] = [
+    re.compile(r"(\d+(?:\.\d+)?)\s*\+?\s*years?\s+(?:of\s+)?(?:experience|exp\b)", re.I),
+    re.compile(r"experience\s*(?:of\s*)?(\d+(?:\.\d+)?)\s*\+?\s*years?", re.I),
+    re.compile(r"(\d+(?:\.\d+)?)\s*\+?\s*yrs?\s+(?:of\s+)?(?:experience|exp\b)", re.I),
+    re.compile(r"(\d+(?:\.\d+)?)\s*\+?\s*years?\s+(?:of\s+)?(?:work|industry|relevant|professional)", re.I),
+    re.compile(r"(\d+(?:\.\d+)?)\s*\+?\s*years?\s+exp", re.I),
+]
+
+# Skills section header keywords
+_SKILLS_HEADERS: set[str] = {
+    "skills", "technical skills", "core competencies",
+    "technologies", "tech stack", "tools", "expertise",
+    "competencies", "proficiencies", "key skills",
+    "areas of expertise", "tools & technologies",
+}
+
+# Section headers that end a skills block
+_OTHER_SECTIONS: set[str] = {
+    "education", "experience", "work experience", "employment history",
+    "projects", "certifications", "awards", "publications",
+    "interests", "hobbies", "references", "summary", "objective",
+    "profile", "about", "achievements", "languages", "extracurricular",
+    "volunteering", "training", "courses",
+}
+
+_SKILLS_HDR_RE = re.compile(
+    r"^\s*(" + "|".join(re.escape(h) for h in _SKILLS_HEADERS) + r")\s*[:\-]?\s*$",
+    re.IGNORECASE,
+)
+_OTHER_HDR_RE = re.compile(
+    r"^\s*(" + "|".join(re.escape(h) for h in _OTHER_SECTIONS) + r")\s*[:\-]?\s*$",
+    re.IGNORECASE,
+)
+
+# Noise removal: currency symbols, salary patterns, standalone numbers, dates
+_NOISE_RES: list[re.Pattern] = [
+    re.compile(r"[\$₹€£¥]\s*[\d,]+(?:\.\d+)?(?:k|l|lpa|lakh)?", re.I),
+    re.compile(r"\d[\d,]*\s*(?:k|lpa|lakh|lac|cr|crore)?(?:/month|/year|per month|p\.m\.?|p\.a\.?)", re.I),
+    re.compile(r"(?<![a-zA-Z])\b\d{4}\b"),           # 4-digit years
+    re.compile(r"(?<![a-zA-Z\.])\b\d{1,3}\b(?!\s*[a-zA-Z%])"),  # loose small numbers
+    re.compile(
+        r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[\s,]+\d{4}\b",
+        re.I,
+    ),
+    re.compile(r"stipend|salary|ctc|lpa|per annum|per month", re.I),
+    re.compile(r"[^a-zA-Z0-9\s\.\-\+\#/&]"),         # non-skill characters
+]
+
+
+# ===========================================================================
+# TEXT CLEANING
+# ===========================================================================
+
+def clean_text(text: str) -> str:
+    """
+    Remove salary figures, dates, bare numbers, and special characters
+    that would otherwise create false skill matches.
+    """
+    for pat in _NOISE_RES:
+        text = pat.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+# ===========================================================================
+# TEXT EXTRACTION
+# ===========================================================================
+
+def _read_pdf(file_bytes: bytes) -> str:
     text = ""
     try:
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
+                pt = page.extract_text()
+                if pt:
+                    text += pt + "\n"
     except Exception:
         pass
     return text
 
 
-def extract_text_from_docx(file_bytes: bytes) -> str:
-    """Extract raw text from a DOCX file."""
+def _read_docx(file_bytes: bytes) -> str:
     text = ""
     try:
-        doc = docx.Document(io.BytesIO(file_bytes))
-        for para in doc.paragraphs:
+        d = docx.Document(io.BytesIO(file_bytes))
+        for para in d.paragraphs:
             text += para.text + "\n"
     except Exception:
         pass
     return text
 
 
-def extract_text_from_txt(file_bytes: bytes) -> str:
-    """Decode plain text file."""
+def _read_txt(file_bytes: bytes) -> str:
     try:
         return file_bytes.decode("utf-8", errors="replace")
     except Exception:
@@ -93,232 +335,218 @@ def extract_text_from_txt(file_bytes: bytes) -> str:
 
 
 def extract_text(uploaded_file) -> str:
-    """Route to appropriate extractor based on file type."""
-    file_bytes = uploaded_file.read()
+    """Extract raw text from an uploaded file (PDF / DOCX / TXT)."""
+    uploaded_file.seek(0)
+    data = uploaded_file.read()
     name = uploaded_file.name.lower()
     if name.endswith(".pdf"):
-        return extract_text_from_pdf(file_bytes)
-    elif name.endswith(".docx"):
-        return extract_text_from_docx(file_bytes)
-    elif name.endswith(".txt"):
-        return extract_text_from_txt(file_bytes)
+        return _read_pdf(data)
+    if name.endswith(".docx"):
+        return _read_docx(data)
+    if name.endswith(".txt"):
+        return _read_txt(data)
     return ""
 
 
-# ---------------------------------------------------------------------------
-# Parsing Helpers
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# SKILL EXTRACTION  (library-only, no free-form tokens)
+# ===========================================================================
 
-def tokenize_skills(text: str) -> set:
+def find_skills_in_text(text: str) -> set[str]:
     """
-    Extract candidate skill tokens from free-form text.
-    Returns lowercase stripped tokens (1–4 words each).
+    Return the subset of SKILL_LIBRARY entries found in `text`.
+    Checks longest phrases first to prevent partial matches.
+    ONLY skills in _ALL_SKILLS can ever be returned.
     """
-    tokens = set()
-    text_lower = text.lower()
-
-    # Multi-word phrases (2–4 words) using sliding window over words
-    words = re.findall(r"[a-z0-9#+.\-/]+", text_lower)
-    for n in range(1, 5):
-        for i in range(len(words) - n + 1):
-            phrase = " ".join(words[i : i + n])
-            if len(phrase) > 1:
-                tokens.add(phrase)
-
-    return tokens
+    tl = text.lower()
+    found: set[str] = set()
+    for skill in _SKILLS_BY_LENGTH:
+        if _SKILL_PATTERNS[skill].search(tl):
+            found.add(skill)
+    return found
 
 
-def detect_skills_section_bounds(lines: list[str]) -> tuple[int, int]:
+def _skills_section_bounds(lines: list[str]) -> tuple[int, int]:
     """
-    Return (start_line, end_line) of the skills section, or (-1, -1) if absent.
-    The section ends when another section header is detected.
+    Find the line range [start, end) of the skills section.
+    Returns (-1, -1) if no skills section detected.
     """
-    section_header_re = re.compile(
-        r"^\s*(skills|technical skills|core competencies|technologies|"
-        r"tech stack|tools|expertise|competencies|proficiencies)\s*[:\-]?\s*$",
-        re.IGNORECASE,
-    )
-    # Detect any generic section header (ALL CAPS or Title Case short lines)
-    generic_header_re = re.compile(r"^\s*[A-Z][A-Za-z\s]{2,30}\s*[:\-]?\s*$")
-
     start = -1
     for i, line in enumerate(lines):
-        if section_header_re.match(line):
+        if _SKILLS_HDR_RE.match(line.strip()):
             start = i
             break
-
     if start == -1:
         return -1, -1
 
     end = len(lines)
     for i in range(start + 1, len(lines)):
         stripped = lines[i].strip()
-        if not stripped:
-            continue
-        if generic_header_re.match(stripped) and not section_header_re.match(stripped):
+        if stripped and _OTHER_HDR_RE.match(stripped):
             end = i
             break
-
     return start, end
 
 
-def extract_skills_with_weights(text: str, jd_skills: set) -> dict[str, float]:
+def extract_skills_weighted(raw_text: str, target_skills: set[str]) -> dict[str, float]:
     """
-    For each JD skill, determine if it appears in the resume and at what weight.
-    Skills section → weight 1.0; elsewhere → weight 0.6.
-    Returns {skill: weight} for matched skills only.
+    For each skill in `target_skills`, search the resume and assign weight:
+      - Found in dedicated skills section → 1.0
+      - Found elsewhere in the document   → 0.6
+      - Not found                         → excluded from result
+
+    Returns {skill: weight}.
     """
-    lines = text.split("\n")
-    sec_start, sec_end = detect_skills_section_bounds(lines)
+    lines = raw_text.split("\n")
+    s, e = _skills_section_bounds(lines)
 
-    skills_section_text = ""
-    if sec_start != -1:
-        skills_section_text = " ".join(lines[sec_start:sec_end]).lower()
+    sec_lower = " ".join(lines[s:e]).lower() if s != -1 else ""
+    full_lower = raw_text.lower()
 
-    full_text_lower = text.lower()
-    matched = {}
-
-    for skill in jd_skills:
-        skill_lower = skill.lower()
-        # Check skills section first (higher weight)
-        if skills_section_text and skill_lower in skills_section_text:
+    matched: dict[str, float] = {}
+    for skill in target_skills:
+        pat = _SKILL_PATTERNS[skill]
+        if sec_lower and pat.search(sec_lower):
             matched[skill] = 1.0
-        elif skill_lower in full_text_lower:
+        elif pat.search(full_lower):
             matched[skill] = 0.6
-
     return matched
 
 
-def score_education(text: str) -> float:
+# ===========================================================================
+# JD FEATURE EXTRACTION  (called once per JD)
+# ===========================================================================
+
+def extract_jd_features(raw_text: str) -> dict:
     """
-    Rule-based education score (0–100).
-    Takes the highest matching qualification found in text.
+    Parse a JD once. Returns:
+      skills         – set of SKILL_LIBRARY skills present in the JD
+      required_exp   – years of experience required (0 if unspecified)
     """
-    text_lower = text.lower()
-    best = 0
-    for keyword, score in EDUCATION_SCORE_MAP.items():
-        if keyword in text_lower:
-            best = max(best, score)
-    return best
+    cleaned = clean_text(raw_text)
+    skills = find_skills_in_text(cleaned)
+    required_exp = _max_years(raw_text)
+    return {"skills": skills, "required_exp": required_exp}
 
 
-def score_experience(text: str) -> float:
-    """
-    Extract years of experience from text and map to 0–100 score.
-    """
-    text_lower = text.lower()
-    years_found = []
-
-    for pattern in EXPERIENCE_PATTERNS:
-        matches = re.findall(pattern, text_lower)
-        for m in matches:
+def _max_years(text: str) -> float:
+    """Return the largest years-of-experience figure found in text."""
+    tl = text.lower()
+    hits: list[float] = []
+    for pat in _EXP_PATTERNS:
+        for m in pat.findall(tl):
             try:
-                years_found.append(float(m))
+                hits.append(float(m))
             except ValueError:
                 pass
-
-    if not years_found:
-        return 0.0
-
-    years = max(years_found)
-
-    # Map years → score (capped at 15 years = 100)
-    if years >= 15:
-        return 100.0
-    elif years >= 10:
-        return 90.0
-    elif years >= 7:
-        return 80.0
-    elif years >= 5:
-        return 70.0
-    elif years >= 3:
-        return 55.0
-    elif years >= 1:
-        return 35.0
-    else:
-        return 10.0
+    return max(hits) if hits else 0.0
 
 
-# ---------------------------------------------------------------------------
-# JD Feature Extraction
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# RESUME PARSING
+# ===========================================================================
 
-def extract_jd_features(jd_text: str) -> dict:
+def parse_resume(raw_text: str) -> dict:
     """
-    Extract skills required by a JD.
-    Returns a dict with 'skills' (set of strings).
+    Parse a resume into structured fields.
+    Returns: cleaned_text, raw_text, skills (set), experience_years (float).
     """
-    tokens = tokenize_skills(jd_text)
-    # Filter to plausible skill tokens (remove very short/generic ones)
-    skills = {t for t in tokens if 2 < len(t) <= 40}
-    return {"skills": skills}
-
-
-# ---------------------------------------------------------------------------
-# Scoring
-# ---------------------------------------------------------------------------
-
-def score_resume_against_jd(
-    resume_text: str,
-    jd_features: dict,
-    weights: dict,
-) -> dict:
-    """
-    Compute the composite score of a resume against a JD.
-
-    Returns:
-        {
-            "total": float (0–100),
-            "skill_score": float,
-            "education_score": float,
-            "experience_score": float,
-            "matched_skills": list[str],
-            "missing_skills": list[str],
-        }
-    """
-    jd_skills = jd_features["skills"]
-
-    # --- Skill scoring with section-aware weighting ---
-    matched_weighted = extract_skills_with_weights(resume_text, jd_skills)
-
-    if jd_skills:
-        # Each skill contributes proportionally; max possible = len(jd_skills) * 1.0
-        raw_skill_score = sum(matched_weighted.values()) / len(jd_skills)
-        skill_score = min(raw_skill_score * 100, 100.0)
-    else:
-        skill_score = 0.0
-
-    matched_skills = sorted(matched_weighted.keys())
-    missing_skills = sorted(jd_skills - set(matched_weighted.keys()))
-
-    # --- Education & Experience ---
-    education_score = score_education(resume_text)
-    experience_score = score_experience(resume_text)
-
-    # --- Weighted total ---
-    w_skill = weights["skills"] / 100
-    w_edu = weights["education"] / 100
-    w_exp = weights["experience"] / 100
-
-    total = (
-        skill_score * w_skill
-        + education_score * w_edu
-        + experience_score * w_exp
-    )
-
+    cleaned = clean_text(raw_text)
     return {
-        "total": round(total, 1),
-        "skill_score": round(skill_score, 1),
-        "education_score": round(education_score, 1),
-        "experience_score": round(experience_score, 1),
-        "matched_skills": matched_skills,
-        "missing_skills": missing_skills,
+        "raw_text": raw_text,
+        "cleaned_text": cleaned,
+        "skills": find_skills_in_text(cleaned),
+        "experience_years": _max_years(raw_text),
     }
 
 
-# ---------------------------------------------------------------------------
-# Clustering: assign each resume to its best-fit JD
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# SCORING
+# ===========================================================================
+
+def compute_skill_score(
+    raw_text: str, jd_skills: set[str]
+) -> tuple[float, list[str], list[str]]:
+    """
+    Skill Score = sum(section-aware weights for matched JD skills)
+                  ─────────────────────────────────────────────── × 100
+                         total number of JD skills
+
+    Returns (score_0_100, matched_list, missing_list).
+    """
+    if not jd_skills:
+        return 0.0, [], []
+
+    weighted = extract_skills_weighted(raw_text, jd_skills)
+    raw_score = sum(weighted.values()) / len(jd_skills)
+    score = round(min(raw_score * 100, 100.0), 1)
+    matched = sorted(weighted.keys())
+    missing = sorted(jd_skills - weighted.keys())
+    return score, matched, missing
+
+
+def compute_education_score(raw_text: str) -> float:
+    """
+    Scan text for education keywords (highest-level first).
+    Return mapped score (0–100); first match wins.
+    """
+    tl = raw_text.lower()
+    for keywords, pts in EDUCATION_DEGREES:
+        for kw in keywords:
+            # whole-word match to avoid "master" matching "mastercard"
+            pat = r"(?<![a-z])" + re.escape(kw) + r"(?![a-z])"
+            if re.search(pat, tl):
+                return float(pts)
+    return 0.0
+
+
+def compute_experience_score(resume_years: float, required_years: float) -> float:
+    """
+    resume_years >= required_years → 100
+    resume_years < required_years  → proportional (resume / required × 100)
+    required_years == 0            → 100 (no requirement specified)
+    """
+    if required_years <= 0:
+        return 100.0
+    if resume_years >= required_years:
+        return 100.0
+    return round((resume_years / required_years) * 100, 1)
+
+
+def score_resume_against_jd(
+    resume: dict, jd_features: dict, weights: dict
+) -> dict:
+    """
+    Composite weighted score for a single (resume, JD) pair.
+    All sub-scores are on a 0–100 scale.
+    """
+    skill_score, matched, missing = compute_skill_score(
+        resume["raw_text"], jd_features["skills"]
+    )
+    edu_score = compute_education_score(resume["raw_text"])
+    exp_score = compute_experience_score(
+        resume["experience_years"], jd_features["required_exp"]
+    )
+
+    total = (
+        skill_score * (weights["skills"]     / 100)
+        + edu_score  * (weights["education"]  / 100)
+        + exp_score  * (weights["experience"] / 100)
+    )
+
+    return {
+        "total":            round(total, 1),
+        "skill_score":      round(skill_score, 1),
+        "education_score":  round(edu_score, 1),
+        "experience_score": round(exp_score, 1),
+        "matched_skills":   matched,
+        "missing_skills":   missing,
+    }
+
+
+# ===========================================================================
+# CLUSTERING  — one resume → one JD, no duplicates
+# ===========================================================================
 
 def cluster_resumes_to_jds(
     resumes: list[dict],
@@ -327,228 +555,187 @@ def cluster_resumes_to_jds(
     top_n: int,
 ) -> dict[str, list[dict]]:
     """
-    Assign each resume to exactly one JD (best match, no duplication).
-    Returns {jd_name: [candidate_result, ...]} sorted by score desc, capped at top_n.
+    Greedy assignment:
+    1. Score every (resume, JD) pair.
+    2. Sort all pairs descending by score.
+    3. Walk the list: assign each resume to its best available JD.
+       Each resume is assigned exactly once.
+       Each JD accepts at most `top_n` candidates.
 
-    Each candidate_result = {
-        "name": str,
-        "score_data": dict,
-    }
+    Returns {jd_name: [{"name": str, "score_data": dict}, ...]} sorted desc.
     """
-    # Step 1: Score every resume against every JD
-    all_scores = []  # (resume_idx, jd_idx, score)
+    # Build full score matrix
+    matrix: list[tuple[int, int, float, dict]] = []
     for r_idx, resume in enumerate(resumes):
         for j_idx, jd in enumerate(jd_list):
-            score_data = score_resume_against_jd(
-                resume["text"], jd["features"], weights
-            )
-            all_scores.append((r_idx, j_idx, score_data["total"], score_data))
+            sd = score_resume_against_jd(resume, jd["features"], weights)
+            matrix.append((r_idx, j_idx, sd["total"], sd))
 
-    # Step 2: Sort by score descending for greedy assignment
-    all_scores.sort(key=lambda x: x[2], reverse=True)
+    matrix.sort(key=lambda x: x[2], reverse=True)
 
-    assigned_resumes = set()
-    jd_assignments = defaultdict(list)
+    assigned: set[int] = set()
+    slots: dict[str, int] = defaultdict(int)
+    result: dict[str, list[dict]] = defaultdict(list)
 
-    for r_idx, j_idx, score, score_data in all_scores:
-        if r_idx in assigned_resumes:
+    for r_idx, j_idx, _, sd in matrix:
+        if r_idx in assigned:
             continue
         jd_name = jd_list[j_idx]["name"]
-        # Only assign if this JD still has capacity
-        if len(jd_assignments[jd_name]) < top_n:
-            jd_assignments[jd_name].append({
-                "name": resumes[r_idx]["name"],
-                "score_data": score_data,
-            })
-            assigned_resumes.add(r_idx)
-
-        if len(assigned_resumes) == len(resumes):
+        if slots[jd_name] >= top_n:
+            continue
+        result[jd_name].append({"name": resumes[r_idx]["name"], "score_data": sd})
+        assigned.add(r_idx)
+        slots[jd_name] += 1
+        if len(assigned) == len(resumes):
             break
 
-    # Sort each JD's candidates by score descending
-    for jd_name in jd_assignments:
-        jd_assignments[jd_name].sort(
-            key=lambda x: x["score_data"]["total"], reverse=True
-        )
+    # Sort each bucket descending
+    for name in result:
+        result[name].sort(key=lambda x: x["score_data"]["total"], reverse=True)
 
-    return dict(jd_assignments)
+    return dict(result)
 
 
-# ---------------------------------------------------------------------------
-# Word Report Generation
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# WORD REPORT GENERATION
+# ===========================================================================
 
-def _add_heading(doc: Document, text: str, level: int = 1, color=None):
-    """Add a styled heading paragraph."""
-    heading = doc.add_heading(text, level=level)
-    run = heading.runs[0] if heading.runs else heading.add_run(text)
-    if color:
-        run.font.color.rgb = RGBColor(*color)
-    return heading
+def _rgb(run, r: int, g: int, b: int) -> None:
+    run.font.color.rgb = RGBColor(r, g, b)
 
 
-def _add_horizontal_rule(doc: Document):
-    """Add a thin horizontal line using paragraph border."""
+def _hr(doc: Document) -> None:
+    """Thin grey horizontal rule between candidate blocks."""
     p = doc.add_paragraph()
     pPr = p._p.get_or_add_pPr()
     pBdr = OxmlElement("w:pBdr")
-    bottom = OxmlElement("w:bottom")
-    bottom.set(qn("w:val"), "single")
-    bottom.set(qn("w:sz"), "6")
-    bottom.set(qn("w:space"), "1")
-    bottom.set(qn("w:color"), "CCCCCC")
-    pBdr.append(bottom)
+    bot = OxmlElement("w:bottom")
+    bot.set(qn("w:val"), "single")
+    bot.set(qn("w:sz"), "6")
+    bot.set(qn("w:space"), "1")
+    bot.set(qn("w:color"), "CCCCCC")
+    pBdr.append(bot)
     pPr.append(pBdr)
-    return p
 
 
-def _add_score_row(doc: Document, label: str, value: str):
-    """Add a label: value line in a paragraph."""
+def _label_value(doc: Document, label: str, value: str) -> None:
     p = doc.add_paragraph()
-    run_label = p.add_run(f"{label}: ")
-    run_label.bold = True
+    p.add_run(f"{label}: ").bold = True
     p.add_run(value)
-    return p
+    p.paragraph_format.space_after = Pt(2)
 
 
-def _add_bullet_list(doc: Document, items: list[str], style: str = "List Bullet"):
-    """Add items as bullet list paragraphs."""
+def _bullets(doc: Document, items: list[str]) -> None:
     for item in items:
         try:
-            doc.add_paragraph(item, style=style)
+            doc.add_paragraph(item, style="List Bullet")
         except Exception:
             p = doc.add_paragraph()
-            p.add_run(f"• {item}")
+            p.add_run(f"  \u2022 {item}")
 
 
 def generate_jd_report(jd_name: str, candidates: list[dict]) -> bytes:
-    """
-    Generate a Word document report for a single JD.
-    Returns bytes of the .docx file.
-    """
+    """Build and return a Word (.docx) report for one JD as raw bytes."""
     doc = Document()
+    for sec in doc.sections:
+        sec.top_margin = Inches(1)
+        sec.bottom_margin = Inches(1)
+        sec.left_margin = Inches(1.2)
+        sec.right_margin = Inches(1.2)
 
-    # --- Page margins ---
-    for section in doc.sections:
-        section.top_margin = Inches(1)
-        section.bottom_margin = Inches(1)
-        section.left_margin = Inches(1.2)
-        section.right_margin = Inches(1.2)
-
-    # --- Document title ---
-    title = doc.add_heading(f"Hiring Report — {jd_name}", level=0)
+    # Title
+    title = doc.add_heading(f"Hiring Report \u2014 {jd_name}", level=0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     if title.runs:
-        title.runs[0].font.color.rgb = RGBColor(0x1F, 0x45, 0x7C)
-
-    doc.add_paragraph()  # spacer
+        _rgb(title.runs[0], 0x1F, 0x45, 0x7C)
+    doc.add_paragraph()
 
     if not candidates:
         p = doc.add_paragraph("No suitable candidates found for this role.")
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     else:
-        summary_para = doc.add_paragraph()
-        summary_para.add_run(f"Total Candidates Selected: ").bold = True
-        summary_para.add_run(str(len(candidates)))
+        s = doc.add_paragraph()
+        s.add_run("Total Candidates Selected: ").bold = True
+        s.add_run(str(len(candidates)))
         doc.add_paragraph()
 
-        for idx, candidate in enumerate(candidates, 1):
-            name = candidate["name"]
-            sd = candidate["score_data"]
+        for idx, cand in enumerate(candidates, 1):
+            sd = cand["score_data"]
 
-            # Candidate header
-            cand_heading = doc.add_heading(f"{idx}. {name}", level=2)
-            if cand_heading.runs:
-                cand_heading.runs[0].font.color.rgb = RGBColor(0x2E, 0x74, 0xB5)
+            h = doc.add_heading(f"{idx}. {cand['name']}", level=2)
+            if h.runs:
+                _rgb(h.runs[0], 0x2E, 0x74, 0xB5)
 
-            # Match score (prominent)
-            score_para = doc.add_paragraph()
-            score_run = score_para.add_run(f"Match Score: {sd['total']}%")
-            score_run.bold = True
-            score_run.font.size = Pt(13)
-            score_run.font.color.rgb = RGBColor(0x37, 0x86, 0x3C)
+            sp = doc.add_paragraph()
+            sr = sp.add_run(f"Match Score: {sd['total']}%")
+            sr.bold = True
+            sr.font.size = Pt(13)
+            _rgb(sr, 0x37, 0x86, 0x3C)
 
-            # Score breakdown
-            breakdown_heading = doc.add_paragraph()
-            breakdown_heading.add_run("Score Breakdown:").bold = True
+            doc.add_paragraph().add_run("Score Breakdown:").bold = True
+            _label_value(doc, "  Skills",     f"{sd['skill_score']}%")
+            _label_value(doc, "  Education",  f"{sd['education_score']}%")
+            _label_value(doc, "  Experience", f"{sd['experience_score']}%")
+            doc.add_paragraph()
 
-            _add_score_row(doc, "  Skills", f"{sd['skill_score']}%")
-            _add_score_row(doc, "  Education", f"{sd['education_score']}%")
-            _add_score_row(doc, "  Experience", f"{sd['experience_score']}%")
-
-            doc.add_paragraph()  # spacer
-
-            # Matched skills
-            matched_heading = doc.add_paragraph()
-            matched_heading.add_run("Matched Skills:").bold = True
-
+            doc.add_paragraph().add_run("Matched Skills:").bold = True
             if sd["matched_skills"]:
-                # Show up to 20 most relevant matched skills
-                _add_bullet_list(doc, sd["matched_skills"][:20])
+                _bullets(doc, sd["matched_skills"][:30])
             else:
                 doc.add_paragraph("  None detected")
 
-            # Missing skills
-            missing_heading = doc.add_paragraph()
-            missing_heading.add_run("Missing Skills:").bold = True
-
+            doc.add_paragraph().add_run("Missing Skills:").bold = True
             if sd["missing_skills"]:
-                # Show up to 20 most critical missing skills
-                _add_bullet_list(doc, sd["missing_skills"][:20])
+                _bullets(doc, sd["missing_skills"][:30])
             else:
-                doc.add_paragraph("  None — all JD skills matched")
+                doc.add_paragraph("  None \u2014 all JD skills matched")
 
-            _add_horizontal_rule(doc)
-            doc.add_paragraph()  # spacer between candidates
+            _hr(doc)
+            doc.add_paragraph()
 
-    # --- Save to bytes ---
-    buffer = io.BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    return buffer.getvalue()
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
 
 
-# ---------------------------------------------------------------------------
-# Streamlit UI
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# STREAMLIT UI
+# ===========================================================================
 
-def main():
+def main() -> None:
     st.set_page_config(
-        page_title="ATS — Resume Screener",
-        page_icon="📋",
+        page_title="ATS \u2014 Resume Screener",
+        page_icon="\U0001f4cb",
         layout="centered",
     )
-
-    # Minimal CSS
     st.markdown(
         """
         <style>
-        .block-container { max-width: 780px; padding-top: 2rem; }
+        .block-container { max-width: 800px; padding-top: 2rem; }
         h1 { color: #1F457C; }
-        .stAlert { border-radius: 6px; }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    st.title("📋 ATS Resume Screener")
-    st.caption("Upload job descriptions and resumes. Get ranked Word reports per JD.")
-
+    st.title("\U0001f4cb ATS Resume Screener")
+    st.caption("Upload job descriptions and resumes. Download ranked Word reports per JD.")
     st.divider()
 
-    # ── 1. Upload Job Descriptions ──────────────────────────────────────────
-    st.subheader("1 · Job Descriptions")
+    # 1 · Job Descriptions
+    st.subheader("1 \u00b7 Job Descriptions")
     jd_files = st.file_uploader(
-        "Upload JDs (PDF, DOCX, or TXT)",
+        "Upload JDs (PDF, DOCX, TXT)",
         type=["pdf", "docx", "txt"],
         accept_multiple_files=True,
         key="jd_uploader",
     )
 
-    # ── 2. Upload Resumes ───────────────────────────────────────────────────
-    st.subheader("2 · Resumes")
+    # 2 · Resumes
+    st.subheader("2 \u00b7 Resumes")
     resume_files = st.file_uploader(
-        "Upload Resumes (PDF, DOCX, or TXT)",
+        "Upload Resumes (PDF, DOCX, TXT)",
         type=["pdf", "docx", "txt"],
         accept_multiple_files=True,
         key="resume_uploader",
@@ -556,127 +743,116 @@ def main():
 
     st.divider()
 
-    # ── 3. Top N Slider ─────────────────────────────────────────────────────
-    st.subheader("3 · Top Candidates per JD")
-    top_n = st.slider("Select top N candidates per JD", 1, 20, 5)
+    # 3 · Top N
+    st.subheader("3 \u00b7 Top Candidates per JD")
+    top_n = st.slider("Select top N candidates", min_value=1, max_value=20, value=5)
 
     st.divider()
 
-    # ── 4. Scoring Weights ──────────────────────────────────────────────────
-    st.subheader("4 · Scoring Weights")
-    st.caption("Adjust the importance of each dimension. Total must equal 100.")
-
+    # 4 · Scoring weights
+    st.subheader("4 \u00b7 Scoring Weights  (must total 100%)")
     col1, col2, col3 = st.columns(3)
     with col1:
         w_skills = st.slider("Skills %", 0, 100, 60, step=5)
     with col2:
-        w_education = st.slider("Education %", 0, 100, 20, step=5)
+        w_edu = st.slider("Education %", 0, 100, 20, step=5)
     with col3:
-        w_experience = st.slider("Experience %", 0, 100, 20, step=5)
+        w_exp = st.slider("Experience %", 0, 100, 20, step=5)
 
-    total_weight = w_skills + w_education + w_experience
-    weight_ok = total_weight == 100
-
-    if total_weight != 100:
-        st.warning(f"⚠️ Weights total {total_weight}%. Please adjust so they sum to 100%.")
+    total_w = w_skills + w_edu + w_exp
+    if total_w != 100:
+        st.warning(f"\u26a0\ufe0f Weights total {total_w}% \u2014 adjust to sum to 100%.")
     else:
-        st.success("✅ Weights sum to 100%")
+        st.success("\u2705 Weights sum to 100%")
 
     st.divider()
 
-    # ── 5. Generate Button ──────────────────────────────────────────────────
-    generate = st.button("📄 Generate Hiring Report", type="primary", use_container_width=True)
-
-    if generate:
-        # Validation
+    # 5 · Generate
+    if st.button(
+        "\U0001f4c4 Generate Hiring Report", type="primary", use_container_width=True
+    ):
+        errors = []
         if not jd_files:
-            st.error("Please upload at least one Job Description.")
-            return
+            errors.append("Upload at least one Job Description.")
         if not resume_files:
-            st.error("Please upload at least one Resume.")
-            return
-        if not weight_ok:
-            st.error("Weights must sum to 100% before generating reports.")
+            errors.append("Upload at least one Resume.")
+        if total_w != 100:
+            errors.append("Scoring weights must sum to 100%.")
+        for e in errors:
+            st.error(e)
+        if errors:
             return
 
-        weights = {
-            "skills": w_skills,
-            "education": w_education,
-            "experience": w_experience,
-        }
+        weights = {"skills": w_skills, "education": w_edu, "experience": w_exp}
 
-        # ── Parse JDs (once) ────────────────────────────────────────────────
-        with st.spinner("Parsing job descriptions…"):
+        # Parse JDs once each
+        with st.spinner("Parsing job descriptions\u2026"):
             jd_list = []
             for f in jd_files:
-                text = extract_text(f)
-                if not text.strip():
-                    st.warning(f"⚠️ Could not extract text from JD: {f.name}")
+                raw = extract_text(f)
+                if not raw.strip():
+                    st.warning(f"\u26a0\ufe0f Could not read: {f.name}")
                     continue
-                name = f.name.rsplit(".", 1)[0]
-                features = extract_jd_features(text)
-                jd_list.append({"name": name, "text": text, "features": features})
+                jd_list.append({
+                    "name": f.name.rsplit(".", 1)[0],
+                    "features": extract_jd_features(raw),
+                })
 
         if not jd_list:
-            st.error("No valid JDs could be parsed.")
+            st.error("No valid JDs parsed.")
             return
 
-        # ── Parse Resumes ───────────────────────────────────────────────────
-        with st.spinner("Parsing resumes…"):
+        # Parse resumes
+        with st.spinner("Parsing resumes\u2026"):
             resume_list = []
             for f in resume_files:
-                text = extract_text(f)
-                if not text.strip():
-                    st.warning(f"⚠️ Could not extract text from resume: {f.name}")
+                raw = extract_text(f)
+                if not raw.strip():
+                    st.warning(f"\u26a0\ufe0f Could not read: {f.name}")
                     continue
-                name = f.name.rsplit(".", 1)[0]
-                resume_list.append({"name": name, "text": text})
+                parsed = parse_resume(raw)
+                resume_list.append({"name": f.name.rsplit(".", 1)[0], **parsed})
 
         if not resume_list:
-            st.error("No valid resumes could be parsed.")
+            st.error("No valid resumes parsed.")
             return
 
-        # ── Cluster & Score ─────────────────────────────────────────────────
-        with st.spinner("Scoring and assigning candidates…"):
-            assignments = cluster_resumes_to_jds(
-                resume_list, jd_list, weights, top_n
-            )
+        # Score and cluster
+        with st.spinner("Scoring and assigning candidates\u2026"):
+            assignments = cluster_resumes_to_jds(resume_list, jd_list, weights, top_n)
 
-        # ── Summary Display ─────────────────────────────────────────────────
+        # Summary
         st.divider()
         st.subheader("Results Summary")
-
         for jd in jd_list:
             candidates = assignments.get(jd["name"], [])
-            count = len(candidates)
-            if count == 0:
-                st.info(f"**{jd['name']}** → No suitable candidates found")
+            if candidates:
+                st.success(f"**{jd['name']}** \u2192 {len(candidates)} candidate(s) selected")
             else:
-                st.success(f"**{jd['name']}** → {count} candidate(s) selected")
+                st.info(f"**{jd['name']}** \u2192 No suitable candidates found")
 
-        # ── Generate & Offer Downloads ──────────────────────────────────────
+        # Downloads
         st.divider()
         st.subheader("Download Reports")
-
-        any_report = False
+        any_dl = False
         for jd in jd_list:
             candidates = assignments.get(jd["name"], [])
             if not candidates:
                 continue
-
-            any_report = True
-            report_bytes = generate_jd_report(jd["name"], candidates)
-            safe_name = re.sub(r"[^\w\-_]", "_", jd["name"])
-
+            any_dl = True
+            report = generate_jd_report(jd["name"], candidates)
+            safe = re.sub(r"[^\w\-_]", "_", jd["name"])
             st.download_button(
-                label=f"⬇️ Download Report — {jd['name']}",
-                data=report_bytes,
-                file_name=f"{safe_name}_report.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                label=f"\u2b07\ufe0f Download Report \u2014 {jd['name']}",
+                data=report,
+                file_name=f"{safe}_report.docx",
+                mime=(
+                    "application/vnd.openxmlformats-officedocument"
+                    ".wordprocessingml.document"
+                ),
                 use_container_width=True,
             )
-
-        if not any_report:
+        if not any_dl:
             st.warning("No candidates were assigned to any JD.")
 
 
