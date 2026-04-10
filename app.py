@@ -2,11 +2,15 @@
 ATS — Applicant Tracking System
 Rule-based resume screening. Skills matched ONLY from SKILL_LIBRARY.
 No free-form token extraction. No noise. Clean modular design.
+Claude API used ONLY to generate Strengths & Gaps for shortlisted candidates.
 """
 
 import io
+import os
 import re
 from collections import defaultdict
+
+import anthropic
 
 import streamlit as st
 import pdfplumber
@@ -596,6 +600,90 @@ def cluster_resumes_to_jds(
     return dict(result)
 
 
+
+# ===========================================================================
+# CLAUDE API — INSIGHTS GENERATION
+# Sends ONLY skill lists (no resume/JD text). Token-optimized.
+# ===========================================================================
+
+def generate_insights(
+    jd_skills: list[str],
+    matched_skills: list[str],
+    missing_skills: list[str],
+) -> tuple[list[str], list[str]]:
+    """
+    Call Claude to convert structured skill data into Strengths and Gaps.
+    Returns (strengths: list[str], gaps: list[str]).
+    Falls back to simple defaults if the API call fails.
+    """
+    jd_skills_trimmed      = jd_skills[:20]
+    matched_skills_trimmed = matched_skills[:15]
+    missing_skills_trimmed = missing_skills[:15]
+
+    prompt = (
+        "You are an expert recruiter.\n"
+        "Convert structured skill data into hiring insights.\n\n"
+        f"Job Skills: {jd_skills_trimmed}\n"
+        f"Matched Skills: {matched_skills_trimmed}\n"
+        f"Missing Skills: {missing_skills_trimmed}\n\n"
+        "Generate:\n"
+        "Strengths (2\u20133 bullet points)\n"
+        "Gaps (2\u20133 bullet points)\n\n"
+        "Rules:\n"
+        "* Keep each point under 12 words\n"
+        "* Be specific and concise\n"
+        "* Focus only on relevant job alignment\n"
+        "* Do not repeat input directly\n"
+        "* Do not add assumptions\n\n"
+        "Output format:\n"
+        "Strengths:\n* ...\n* ...\nGaps:\n* ...\n* ..."
+    )
+
+    try:
+        client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = message.content[0].text.strip()
+        return _parse_insights(raw)
+    except Exception:
+        strengths = ["Strong alignment with key job requirements"]
+        gaps = ["Some required skills are missing or unverified"]
+        return strengths, gaps
+
+
+def _parse_insights(raw: str) -> tuple[list[str], list[str]]:
+    """Parse Claude's plain-text output into two bullet lists."""
+    strengths: list[str] = []
+    gaps: list[str] = []
+    current: list[str] | None = None
+
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        lower = line.lower()
+        if lower.startswith("strengths"):
+            current = strengths
+            continue
+        if lower.startswith("gaps"):
+            current = gaps
+            continue
+        if line.startswith("*") or line.startswith("-") or line.startswith("\u2022"):
+            text = line.lstrip("*-\u2022 ").strip()
+            if text and current is not None:
+                current.append(text)
+
+    if not strengths:
+        strengths = ["Strong alignment with key job requirements"]
+    if not gaps:
+        gaps = ["Some required skills are missing or unverified"]
+
+    return strengths, gaps
+
+
 # ===========================================================================
 # WORD REPORT GENERATION
 # ===========================================================================
@@ -634,8 +722,10 @@ def _bullets(doc: Document, items: list[str]) -> None:
             p.add_run(f"  \u2022 {item}")
 
 
-def generate_jd_report(jd_name: str, candidates: list[dict]) -> bytes:
-    """Build and return a Word (.docx) report for one JD as raw bytes."""
+def generate_jd_report(jd_name: str, jd_skills: list[str], candidates: list[dict]) -> bytes:
+    """Build and return a Word (.docx) report for one JD as raw bytes.
+    Strengths & Gaps are generated via Claude for each shortlisted candidate.
+    """
     doc = Document()
     for sec in doc.sections:
         sec.top_margin = Inches(1)
@@ -678,17 +768,20 @@ def generate_jd_report(jd_name: str, candidates: list[dict]) -> bytes:
             _label_value(doc, "  Experience", f"{sd['experience_score']}%")
             doc.add_paragraph()
 
-            doc.add_paragraph().add_run("Matched Skills:").bold = True
-            if sd["matched_skills"]:
-                _bullets(doc, sd["matched_skills"][:30])
-            else:
-                doc.add_paragraph("  None detected")
+            # ── Claude-generated Strengths & Gaps ──────────────────────────────────────
+            strengths, gaps = generate_insights(
+                jd_skills=jd_skills,
+                matched_skills=sd["matched_skills"],
+                missing_skills=sd["missing_skills"],
+            )
 
-            doc.add_paragraph().add_run("Missing Skills:").bold = True
-            if sd["missing_skills"]:
-                _bullets(doc, sd["missing_skills"][:30])
-            else:
-                doc.add_paragraph("  None \u2014 all JD skills matched")
+            doc.add_paragraph().add_run("Strengths:").bold = True
+            _bullets(doc, strengths)
+
+            doc.add_paragraph()
+            doc.add_paragraph().add_run("Gaps:").bold = True
+            _bullets(doc, gaps)
+            # ──────────────────────────────────────────────────────────────────────────────
 
             _hr(doc)
             doc.add_paragraph()
@@ -959,7 +1052,9 @@ def main() -> None:
                 candidates = assignments.get(jd["name"], [])
                 if not candidates:
                     continue
-                report = generate_jd_report(jd["name"], candidates)
+                jd_skills = sorted(jd["features"]["skills"])
+                with st.spinner(f"Generating insights for {jd['name']}\u2026"):
+                    report = generate_jd_report(jd["name"], jd_skills, candidates)
                 safe = re.sub(r"[^\w\-_]", "_", jd["name"])
                 st.download_button(
                     label=f"⬇ Download — {jd['name']}",
